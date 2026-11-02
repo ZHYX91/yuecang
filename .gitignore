@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+dist/
+build/
+*.log
+.env
+provider-key
+library.sqlite3*
+project.json
