@@ -129,7 +129,12 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
           error instanceof ApiError && error.status === 409
             ? ' 当前输入已变化，你的编辑仍保留；请比较最新版本后再处理。'
             : '';
-        notify((error instanceof Error ? error.message : '操作失败，请重试。') + suffix, 'error');
+        notify(
+          (error instanceof Error
+            ? error.message
+            : '未能确认操作结果。请先刷新并核对任务或修改记录，再决定是否重试。') + suffix,
+          'error',
+        );
         return undefined;
       } finally {
         setBusy((value) => value - 1);

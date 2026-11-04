@@ -152,3 +152,31 @@ test('HTML success and authentication redirects are never acknowledged as saved'
     globalThis.fetch = previous;
   }
 });
+
+test('unstructured server errors ask to inspect existing results before retrying', async () => {
+  const previous = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (path) => {
+    calls.push(path);
+    if (path === '/api/session')
+      return new Response(JSON.stringify({ csrf_token: 'synthetic-token' }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    return new Response('upstream unavailable', { status: 502 });
+  };
+  try {
+    const { post, ApiError } = await load('api.ts');
+    await assert.rejects(post('/api/exports', { revision_id: 'r1' }), (error) => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.status, 502);
+      assert.equal(
+        error.message,
+        '未收到操作结果（502）。请先刷新并核对任务或修改记录，再决定是否重试。',
+      );
+      return true;
+    });
+    assert.deepEqual(calls, ['/api/session', '/api/exports']);
+  } finally {
+    globalThis.fetch = previous;
+  }
+});
