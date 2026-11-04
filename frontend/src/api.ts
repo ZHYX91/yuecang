@@ -45,7 +45,8 @@ export async function api<T = RecordData>(path: string, init: RequestInit = {}):
     const error = data?.error || data?.detail;
     const message = typeof error === 'string' ? error : error?.message;
     throw new ApiError(
-      message || `操作未完成（${response.status}），请重试。`,
+      message ||
+        `未收到操作结果（${response.status}）。请先刷新并核对任务或修改记录，再决定是否重试。`,
       response.status,
       error?.code,
       error?.details,
