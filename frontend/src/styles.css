@@ -2494,3 +2494,57 @@ pre {
     grid-template-columns: 1fr;
   }
 }
+
+.guided-panel {
+  margin: 1rem 0;
+  padding: 1rem;
+}
+
+.guided-panel > summary,
+.source-panel .detail-section > summary {
+  cursor: pointer;
+}
+
+.guided-source-row,
+.guided-actions,
+.guided-fields {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+}
+
+.guided-source-row > .source-list-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.guided-source-row > input[type='checkbox'] {
+  flex: 0 0 auto;
+  margin-left: .5rem;
+}
+
+.guided-actions {
+  flex-wrap: wrap;
+  margin: .6rem 0;
+}
+
+.guided-fields,
+.guided-options {
+  min-width: 0;
+  margin: .7rem 0;
+  padding: 0;
+  border: 0;
+}
+
+.guided-fields {
+  flex-wrap: wrap;
+  align-items: end;
+}
+
+.guided-fields > label {
+  min-width: min(11rem, 100%);
+}
+
+.guided-options > div + div {
+  margin-top: .75rem;
+}

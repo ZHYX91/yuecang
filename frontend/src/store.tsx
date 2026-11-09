@@ -22,9 +22,14 @@ interface Store {
   notify: (message: string, kind?: Notice['kind']) => void;
   hasUnsavedEdits: boolean;
   setHasUnsavedEdits: (value: boolean) => void;
-  loadMore: (collection: string) => Promise<void>;
+  remember: (collection: string, items: RecordData[]) => void;
 }
 const Context = createContext<Store | null>(null);
+function withRemembered(rows: RecordData[], remembered: RecordData[]) {
+  const ids = new Set(rows.map((item) => item.id));
+  return [...rows, ...remembered.filter((item) => !ids.has(item.id))];
+}
+
 export function WorkbenchProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<WorkbenchState>(emptyState);
   const [ready, setReady] = useState(false);
@@ -35,6 +40,19 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   const [notices, setNotices] = useState<Notice[]>([]);
   const refreshing = useRef<Promise<void> | null>(null);
   const notifiedConnection = useRef(false);
+  const snapshot = useRef<WorkbenchState>(emptyState);
+  const retained = useRef<Record<string, RecordData[]>>({});
+  const remember = useCallback((collection: string, items: RecordData[]) => {
+    if (!items.length || !['books', 'sources', 'editions', 'revisions'].includes(collection))
+      return;
+    const recent: RecordData[] = snapshot.current[collection] || [];
+    const current = new Map(recent.map((item) => [item.id, item]));
+    const values = items.map((item) => current.get(item.id) ?? normalizeRecord(item));
+    const remembered = withRemembered(values, retained.current[collection] || []).slice(0, 500);
+    retained.current[collection] = remembered;
+    const rows = withRemembered(recent, remembered);
+    setState((previous) => ({ ...previous, [collection]: rows }));
+  }, []);
   const notify = useCallback((message: string, kind: Notice['kind'] = 'info') => {
     const id = Date.now() + Math.random();
     setNotices((previous) => [...previous.slice(-1), { id, kind, message }]);
@@ -49,22 +67,19 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     refreshing.current = (async () => {
       try {
         const next = await api<Partial<WorkbenchState>>('/api/state');
-        setState((previous) => {
-          const normalized = { ...emptyState, ...next } as WorkbenchState;
-          for (const [key, value] of Object.entries(normalized)) {
-            if (Array.isArray(value)) {
-              const rows = value.map(normalizeRecord);
-              if (next.totals?.[key] > rows.length && previous[key]?.length > rows.length) {
-                const known = new Set(rows.map((item) => item.id));
-                normalized[key] = [
-                  ...rows,
-                  ...previous[key].filter((item: RecordData) => !known.has(item.id)),
-                ].slice(0, next.totals[key]);
-              } else normalized[key] = rows;
-            }
-          }
-          return normalized;
-        });
+        const normalized = { ...emptyState, ...next } as WorkbenchState;
+        for (const [key, value] of Object.entries(normalized)) {
+          if (Array.isArray(value)) normalized[key] = value.map(normalizeRecord);
+        }
+        snapshot.current = normalized;
+        const visible = { ...normalized };
+        for (const [collection, remembered] of Object.entries(retained.current)) {
+          const rows: RecordData[] = normalized[collection];
+          const recent = new Map(rows.map((item) => [item.id, item]));
+          retained.current[collection] = remembered.map((item) => recent.get(item.id) ?? item);
+          visible[collection] = withRemembered(rows, remembered);
+        }
+        setState(visible);
         setConnected(true);
         setReady(true);
         notifiedConnection.current = false;
@@ -121,6 +136,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       setBusy((value) => value + 1);
       try {
         const result = await action();
+        if (refreshing.current) await refreshing.current;
         await refresh();
         if (message) notify(message, 'success');
         return result;
@@ -137,33 +153,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     },
     [notify, refresh],
   );
-  const loadMore = useCallback(
-    async (collection: string) => {
-      setBusy((value) => value + 1);
-      try {
-        const data = await api<{ items: RecordData[]; total: number }>(
-          `/api/${collection}?offset=${state[collection]?.length || 0}&limit=500`,
-        );
-        setState((previous) => {
-          const rows = previous[collection] || [];
-          const known = new Set(rows.map((row: RecordData) => row.id));
-          return {
-            ...previous,
-            [collection]: [
-              ...rows,
-              ...data.items.map(normalizeRecord).filter((item) => !known.has(item.id)),
-            ],
-            totals: { ...previous.totals, [collection]: data.total },
-          };
-        });
-      } catch (error) {
-        notify(error instanceof Error ? error.message : '无法载入下一批记录。', 'error');
-      } finally {
-        setBusy((value) => value - 1);
-      }
-    },
-    [state, notify],
-  );
   return (
     <Context.Provider
       value={{
@@ -177,7 +166,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
         notify,
         hasUnsavedEdits,
         setHasUnsavedEdits,
-        loadMore,
+        remember,
       }}
     >
       {children}

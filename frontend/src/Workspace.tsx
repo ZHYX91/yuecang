@@ -1,10 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { post } from './api';
-import { Empty, Icon, SectionHeading, shortId } from './components';
+import { Empty, Icon, Issues, Pager, SectionHeading, shortId } from './components';
+import { useTargetRows } from './AssignmentTarget';
+import { useCollection } from './collections';
 import { SourcePanel } from './SourcePanel';
 import RevisionEditor from './RevisionEditor';
 import Comparison from './Comparison';
 import SourceAlignment from './SourceAlignment';
+import CurationPanel from './CurationPanel';
 import { useWorkbench } from './store';
 import {
   assemblyPayload,
@@ -42,25 +45,51 @@ export default function Workspace({
   openBooks: () => void;
   onReviewRequest: (id: string) => void;
 }) {
-  const { state, run, busy, hasUnsavedEdits } = useWorkbench();
+  const { state, run, busy, hasUnsavedEdits, remember, notify } = useWorkbench();
+  const unsavedRef = useRef(hasUnsavedEdits);
   const [leftId, setLeftId] = useState(sourceId);
   const [rightId, setRightId] = useState('');
   const [editionId, setEditionId] = useState('');
   const [allowComposite, setAllowComposite] = useState(false);
   const [tab, setTab] = useState<'compare' | 'edit'>(revisionId ? 'edit' : 'compare');
-  const editions = state.editions.filter((item) => item.book_id === bookId);
-  const revisions = state.revisions.filter((item) => item.book_id === bookId);
-  const latestAlignmentAssignment = (state.assignments || []).find(
-    (item: RecordData) =>
-      item.book_id === bookId &&
-      item.edition_id === editionId &&
-      (item.source_id === leftId || item.source_id === rightId),
+  const [bookQuery, setBookQuery] = useState('');
+  const [editionQuery, setEditionQuery] = useState('');
+  const [leftQuery, setLeftQuery] = useState('');
+  const [rightQuery, setRightQuery] = useState('');
+  const books = useTargetRows(
+    'books',
+    `limit=30&search=${encodeURIComponent(bookQuery.trim())}`,
+    true,
+    state.event_id,
   );
+  const editions = useTargetRows(
+    'editions',
+    `limit=30&book_id=${bookId}&search=${encodeURIComponent(editionQuery.trim())}`,
+    !!bookId,
+    state.event_id,
+  );
+  const leftSources = useTargetRows(
+    'sources',
+    `limit=30&search=${encodeURIComponent(leftQuery.trim())}`,
+    true,
+    state.event_id,
+  );
+  const rightSources = useTargetRows(
+    'sources',
+    `limit=30&search=${encodeURIComponent(rightQuery.trim())}`,
+    true,
+    state.event_id,
+  );
+  const revisions = useCollection('revisions', { book_id: bookId }, 20, !!bookId);
   useEffect(() => {
     if (!leftId && state.sources.length) setLeftId(sourceId || state.sources[0].id);
   }, [leftId, state.sources, sourceId]);
   useEffect(() => {
+    if (sourceId) setLeftId(sourceId);
+  }, [sourceId]);
+  useEffect(() => {
     setEditionId('');
+    setEditionQuery('');
   }, [bookId]);
   useEffect(() => {
     setAllowComposite(false);
@@ -68,6 +97,18 @@ export default function Workspace({
   useEffect(() => {
     if (revisionId) setTab('edit');
   }, [revisionId]);
+  useEffect(() => {
+    unsavedRef.current = hasUnsavedEdits;
+  }, [hasUnsavedEdits]);
+  const openDraft = (id: string, draftBookId: string) => {
+    if (unsavedRef.current) {
+      notify('整理稿已保存。请先保存或放弃当前编辑，再打开生成的整理稿。');
+      return;
+    }
+    setBookId(draftBookId);
+    setRevisionId(id);
+    setTab('edit');
+  };
   const assemble = async () => {
     const result = await run('整理稿已生成，可以继续校订和编辑。', () =>
       post(`/api/books/${bookId}/assemble`, assemblyPayload(selections, editionId, allowComposite)),
@@ -81,19 +122,53 @@ export default function Workspace({
       }
     }
   };
-  const sourceSelect = (value: string, change: (value: string) => void, label: string) => (
-    <label className="source-selector">
-      <span>{label}</span>
-      <select aria-label={label} value={value} onChange={(event) => change(event.target.value)}>
-        <option value="">选择来源文件</option>
-        {state.sources.map((source) => (
-          <option key={source.id} value={source.id}>
-            {nameOf(source)}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
+  const keepSelected = (items: RecordData[], selected: RecordData | undefined) =>
+    selected && !items.some((item) => item.id === selected.id) ? [selected, ...items] : items;
+  const sourceSelect = (
+    value: string,
+    change: (value: string) => void,
+    label: string,
+    query: string,
+    setQuery: (value: string) => void,
+    rows: ReturnType<typeof useTargetRows>,
+  ) => {
+    const choices = keepSelected(
+      rows.items,
+      state.sources.find((item) => item.id === value),
+    );
+    return (
+      <div className="source-selector">
+        <label>
+          搜索{label}
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="文件名或标题"
+          />
+        </label>
+        <label>
+          <span>{label}</span>
+          <select
+            aria-label={label}
+            value={value}
+            onChange={(event) => {
+              const source = choices.find((item) => item.id === event.target.value);
+              if (source) remember('sources', [source]);
+              change(event.target.value);
+            }}
+          >
+            <option value="">选择来源文件</option>
+            {choices.map((source) => (
+              <option key={source.id} value={source.id}>
+                {nameOf(source)}
+              </option>
+            ))}
+          </select>
+        </label>
+        {rows.error && <Issues issues={[rows.error]} />}
+      </div>
+    );
+  };
   return (
     <>
       <SectionHeading
@@ -103,33 +178,64 @@ export default function Workspace({
       />
       <div className="workspace-toolbar card">
         <label>
+          搜索图书
+          <input
+            value={bookQuery}
+            onChange={(event) => setBookQuery(event.target.value)}
+            placeholder="书名或作者"
+          />
+        </label>
+        <label>
           目标图书
           <select
             aria-label="目标图书"
             disabled={hasUnsavedEdits}
             value={bookId}
             onChange={(event) => {
+              const book = books.items.find((item) => item.id === event.target.value);
+              if (book) remember('books', [book]);
               setBookId(event.target.value);
               setRevisionId('');
             }}
           >
             <option value="">选择图书</option>
-            {state.books.map((book) => (
+            {keepSelected(
+              books.items,
+              state.books.find((item) => item.id === bookId),
+            ).map((book) => (
               <option key={book.id} value={book.id}>
                 {book.title}
               </option>
             ))}
           </select>
         </label>
+        {bookId && (
+          <label>
+            搜索版本
+            <input
+              value={editionQuery}
+              onChange={(event) => setEditionQuery(event.target.value)}
+              placeholder="版本名称或译者"
+            />
+          </label>
+        )}
         <label>
           目标版本
           <select
             aria-label="目标版本"
             value={editionId}
-            onChange={(event) => setEditionId(event.target.value)}
+            disabled={!bookId}
+            onChange={(event) => {
+              const edition = editions.items.find((item) => item.id === event.target.value);
+              if (edition) remember('editions', [edition]);
+              setEditionId(event.target.value);
+            }}
           >
             <option value="">版本待确认</option>
-            {editions.map((edition) => (
+            {keepSelected(
+              bookId ? editions.items : [],
+              state.editions.find((item) => item.id === editionId && item.book_id === bookId),
+            ).map((edition) => (
               <option key={edition.id} value={edition.id}>
                 {edition.label || edition.name}
               </option>
@@ -145,13 +251,22 @@ export default function Workspace({
             来源对照
           </button>
           <button className={tab === 'edit' ? 'active' : ''} onClick={() => setTab('edit')}>
-            整理稿 {revisions.length > 0 && <span>{revisions.length}</span>}
+            整理稿 {!!bookId && revisions.total > 0 && <span>{revisions.total}</span>}
           </button>
         </div>
       </div>
+      <Issues issues={[books.error, editions.error].filter(Boolean)} />
+      <div hidden={tab !== 'compare'}>
+        <CurationPanel
+          key={JSON.stringify([bookId, editionId])}
+          bookId={bookId}
+          editionId={editionId}
+          onOpen={openDraft}
+        />
+      </div>
       <div hidden={tab !== 'compare'} className="comparison-layout">
         <section className="card comparison-column">
-          {sourceSelect(leftId, setLeftId, '左侧来源')}
+          {sourceSelect(leftId, setLeftId, '左侧来源', leftQuery, setLeftQuery, leftSources)}
           <SourcePanel
             key={leftId}
             sourceId={leftId}
@@ -162,7 +277,7 @@ export default function Workspace({
           />
         </section>
         <section className="card comparison-column">
-          {sourceSelect(rightId, setRightId, '右侧来源')}
+          {sourceSelect(rightId, setRightId, '右侧来源', rightQuery, setRightQuery, rightSources)}
           <SourcePanel
             key={rightId}
             sourceId={rightId}
@@ -268,7 +383,7 @@ export default function Workspace({
       </div>
       <div hidden={tab !== 'compare'}>
         <SourceAlignment
-          key={JSON.stringify([bookId, editionId, leftId, rightId, latestAlignmentAssignment?.id])}
+          key={JSON.stringify([bookId, editionId, leftId, rightId, state.assignment_generation])}
           bookId={bookId}
           editionId={editionId}
           leftId={leftId}
@@ -278,19 +393,25 @@ export default function Workspace({
         <Comparison leftId={leftId} rightId={rightId} />
       </div>
       <section hidden={tab !== 'edit'} className="card editor-card">
-        {!revisionId && revisions.length > 0 && (
+        {bookId && !revisionId && revisions.total > 0 && (
           <div className="editor-pick">
             <label>
               打开整理稿
               <select value="" onChange={(event) => setRevisionId(event.target.value)}>
                 <option value="">选择已有修订</option>
-                {revisions.map((revision) => (
+                {revisions.items.map((revision) => (
                   <option key={revision.id} value={revision.id}>
                     {shortId(revision.id)} · {revision.metadata?.title || '整理稿'}
                   </option>
                 ))}
               </select>
             </label>
+            <Pager
+              page={revisions.page}
+              total={revisions.total}
+              size={revisions.size}
+              onChange={revisions.setPage}
+            />
           </div>
         )}
         <RevisionEditor

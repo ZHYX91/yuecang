@@ -1,16 +1,16 @@
 import { useState } from 'react';
 import { post } from './api';
+import { useCollection } from './collections';
 import {
   Badge,
-  CollectionCoverage,
   Empty,
   Issues,
   JsonDetails,
   Pager,
+  Search,
   SectionHeading,
   date,
   shortId,
-  usePagination,
 } from './components';
 import { useWorkbench } from './store';
 import { canCancelJob, jobRecoveryRequest } from './types';
@@ -26,20 +26,22 @@ const kinds: Record<string, string> = {
   export: '导出整理稿',
   backup: '项目备份',
 };
+const filterStates: Record<string, string> = {
+  active: 'queued,running,paused',
+  failed: 'failed,needs_attention',
+  done: 'succeeded',
+};
+
 export default function Jobs() {
   const { state, run, busy } = useWorkbench();
   const [filter, setFilter] = useState('all');
-  const active = new Set(['queued', 'running', 'paused', 'waiting_review']);
-  const filtered = state.jobs.filter(
-    (item) =>
-      filter === 'all' ||
-      (filter === 'active'
-        ? active.has(item.status)
-        : filter === 'failed'
-          ? ['failed', 'needs_attention'].includes(item.status)
-          : ['succeeded', 'completed'].includes(item.status)),
+  const [query, setQuery] = useState('');
+  const counts = state.state_counts?.jobs || {};
+  const pagination = useCollection(
+    'jobs',
+    { state: filterStates[filter], search: query.trim() },
+    15,
   );
-  const pagination = usePagination(filtered, 15);
   return (
     <>
       <SectionHeading
@@ -50,33 +52,30 @@ export default function Jobs() {
       <div className="stats-row">
         <div>
           <span>进行中</span>
-          <strong>
-            {state.jobs.filter((item) => ['running', 'queued'].includes(item.status)).length}
-          </strong>
+          <strong>{(counts.running ?? 0) + (counts.queued ?? 0)}</strong>
         </div>
         <div>
           <span>等待处理</span>
-          <strong>
-            {state.jobs.filter((item) => ['paused', 'waiting_review'].includes(item.status)).length}
-          </strong>
+          <strong>{counts.paused ?? 0}</strong>
         </div>
         <div>
           <span>已完成</span>
-          <strong>
-            {state.jobs.filter((item) => ['succeeded', 'completed'].includes(item.status)).length}
-          </strong>
+          <strong>{counts.succeeded ?? 0}</strong>
         </div>
         <div>
           <span>需关注</span>
-          <strong>
-            {
-              state.jobs.filter((item) => ['failed', 'needs_attention'].includes(item.status))
-                .length
-            }
-          </strong>
+          <strong>{(counts.failed ?? 0) + (counts.needs_attention ?? 0)}</strong>
         </div>
       </div>
       <div className="list-toolbar">
+        <Search
+          value={query}
+          onChange={(value) => {
+            setQuery(value);
+            pagination.setPage(0);
+          }}
+          placeholder="搜索任务编号"
+        />
         <div className="filter-tabs">
           {[
             ['all', '全部任务'],
@@ -97,9 +96,9 @@ export default function Jobs() {
           ))}
         </div>
       </div>
-      <CollectionCoverage collection="jobs" />
+      <Issues issues={pagination.error ? [pagination.error] : []} />
       <div className="job-list">
-        {pagination.visible.map((job) => {
+        {pagination.items.map((job) => {
           const progress =
             typeof job.progress === 'number'
               ? job.progress <= 1
@@ -195,14 +194,17 @@ export default function Jobs() {
           );
         })}
       </div>
-      {!filtered.length && (
-        <Empty title="这里会记录每一次处理" icon="jobs">
+      {!pagination.loading && !pagination.error && !pagination.items.length && (
+        <Empty
+          title={filter !== 'all' || query.trim() ? '没有符合条件的任务' : '这里会记录每一次处理'}
+          icon="jobs"
+        >
           <p>导入、来源分析和AI校订的进展与结果，都集中在这里。</p>
         </Empty>
       )}
       <Pager
         page={pagination.page}
-        total={filtered.length}
+        total={pagination.total}
         size={pagination.size}
         onChange={pagination.setPage}
       />

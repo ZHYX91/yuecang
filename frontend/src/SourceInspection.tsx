@@ -52,7 +52,7 @@ export default function SourceInspection({
   const [responseText, setResponseText] = useState('');
   const [readingResponse, setReadingResponse] = useState(false);
   const [selectedBoundaries, setSelectedBoundaries] = useState<string[]>([]);
-  const assignmentVersion = state.assignments?.[0]?.id;
+  const assignmentVersion = state.assignment_generation;
   const reportVersion = useRef(assignmentVersion);
   const staleReport = report && reportVersion.current !== assignmentVersion;
   const boundaries = usePagination<RecordData>(report?.boundaries || [], 10);

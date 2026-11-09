@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { post } from './api';
-import { Issues, JsonDetails, shortId } from './components';
+import { useCollection } from './collections';
+import { Issues, JsonDetails, Pager, Search, shortId } from './components';
 import { useWorkbench } from './store';
 import type { RecordData, Revision } from './types';
 
@@ -27,12 +28,24 @@ export default function RevisionAdvanced({
   onUpdated: (result: RecordData) => void;
   onDirtyChange: (dirty: boolean) => void;
 }) {
-  const { state, run, busy, notify } = useWorkbench();
+  const { run, busy, notify } = useWorkbench();
+  const [opened, setOpened] = useState(false);
+  const [query, setQuery] = useState('');
   const [name, setName] = useState('校订副本');
   const [other, setOther] = useState('');
   const [result, setResult] = useState<RecordData | null>(null);
   const [resolutions, setResolutions] = useState<RecordData>({});
   const [metadata, setMetadata] = useState<RecordData>({});
+  const revisions = useCollection(
+    'revisions',
+    {
+      book_id: revision.book_id,
+      edition_id: revision.edition_id,
+      search: query.trim(),
+    },
+    20,
+    opened,
+  );
   useEffect(() => {
     setMetadata(
       Object.fromEntries(Object.keys(fields).map((key) => [key, revision.metadata?.[key] || ''])),
@@ -70,7 +83,10 @@ export default function RevisionAdvanced({
     } else notify('合并尚未应用。请逐项处理冲突或查看未解决原因。');
   };
   return (
-    <details className="revision-advanced">
+    <details
+      className="revision-advanced"
+      onToggle={(event) => setOpened(event.currentTarget.open)}
+    >
       <summary>分支、合并与整理稿元数据</summary>
       <p className="muted">
         从同一稿件分出不同校订方案；合并只处理同书、同版本且有共同祖先的文字修改。
@@ -98,6 +114,14 @@ export default function RevisionAdvanced({
           从当前稿创建分支
         </button>
       </form>
+      <Search
+        value={query}
+        onChange={(value) => {
+          setQuery(value);
+          revisions.setPage(0);
+        }}
+        placeholder="按题名或编号搜索同版本修订"
+      />
       <div className="advanced-row">
         <label>
           合入其他修订
@@ -112,19 +136,16 @@ export default function RevisionAdvanced({
             }}
           >
             <option value="">选择同版本修订</option>
-            {state.revisions
-              .filter(
-                (r) =>
-                  r.book_id === revision.book_id &&
-                  r.edition_id === revision.edition_id &&
-                  r.id !== revision.id,
-              )
+            {revisions.items
+              .filter((r) => r.id !== revision.id)
               .map((r) => (
                 <option key={r.id} value={r.id}>
                   {r.metadata?.title || '整理稿'} · {shortId(r.id)}
-                  {state.branches.some((b) => b.head_revision_id === r.id) ? ' · 分支当前稿' : ''}
                 </option>
               ))}
+            {other && !revisions.items.some((r) => r.id === other) && (
+              <option value={other}>{shortId(other)}</option>
+            )}
           </select>
         </label>
         <button
@@ -135,6 +156,13 @@ export default function RevisionAdvanced({
           比较并合并
         </button>
       </div>
+      <Pager
+        page={revisions.page}
+        total={revisions.total}
+        size={revisions.size}
+        onChange={revisions.setPage}
+      />
+      <Issues issues={revisions.error ? [revisions.error] : []} />
       {result && !result.merged && (
         <section className="merge-conflicts">
           <Issues

@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import multiprocessing
+from multiprocessing.connection import wait as wait_connections
 import os
 from pathlib import Path
 import subprocess
@@ -12,7 +13,7 @@ import time
 
 import pytest
 
-from yuecang.jobs import JobQueue, run_isolated_one
+from yuecang.jobs import JobQueue, _attempt_stopped, _process_stamp, run_isolated_one, worker_main
 from yuecang.storage.project import DomainError, Project
 
 
@@ -238,8 +239,22 @@ def _sleeping_external_tool(project, job):
         time.sleep(0.1)
 
 
-def _run_sleeping_worker(root):
-    run_isolated_one(JobQueue(root), callback=_sleeping_external_tool)
+def _run_sleeping_worker(root, stop_reader=None):
+    run_isolated_one(JobQueue(root), stop_reader=stop_reader, callback=_sleeping_external_tool)
+
+
+def _serve_worker_until_owner_exits(root, identity_sender, exit_reader):
+    context = multiprocessing.get_context("spawn")
+    stop_reader, stop_writer = context.Pipe(duplex=False)
+    worker = context.Process(target=worker_main, args=(root, stop_reader))
+    worker.start()
+    stop_reader.close()
+    identity_sender.send(_process_stamp(worker.pid))
+    identity_sender.close()
+    # This exits without running any Python shutdown handlers or closing the
+    # stop writer explicitly, as when an API process is unexpectedly killed.
+    wait_connections([exit_reader], timeout=15)
+    os._exit(0)
 
 
 def _running(pid):
@@ -284,6 +299,59 @@ def _assert_ended(pids):
     while any(_running(p) for p in pids) and time.monotonic() < deadline:
         time.sleep(0.1)
     assert not any(_running(p) for p in pids), "owned process survived task closeout"
+
+
+def test_worker_shutdown_eof_pauses_active_job_and_ends_descendants(project):
+    queue = JobQueue(project)
+    job = queue.enqueue("analyze", {})
+    context = multiprocessing.get_context("spawn")
+    stop_reader, stop_writer = context.Pipe(duplex=False)
+    worker = context.Process(target=_run_sleeping_worker, args=(str(project.root), stop_reader))
+    worker.start()
+    stop_reader.close()
+    try:
+        pids = _wait_for_processes(project)
+        identities = [_process_stamp(pid) for pid in pids.values()]
+        assert all(identities)
+        stop_writer.close()
+        worker.join(12)
+        assert worker.exitcode == 0
+        assert queue.get(job["id"])["state"] == "paused"
+        _assert_ended(pids.values())
+        assert all(_attempt_stopped(identity) for identity in identities)
+    finally:
+        stop_writer.close()
+        if worker.is_alive():
+            worker.terminate()
+            worker.join(10)
+
+
+def test_idle_worker_exits_when_owner_disappears_without_cleanup(project):
+    context = multiprocessing.get_context("spawn")
+    identity_reader, identity_sender = context.Pipe(duplex=False)
+    exit_reader, exit_writer = context.Pipe(duplex=False)
+    owner = context.Process(target=_serve_worker_until_owner_exits,
+                            args=(str(project.root), identity_sender, exit_reader))
+    owner.start()
+    identity_sender.close()
+    exit_reader.close()
+    try:
+        assert identity_reader.poll(10)
+        worker_identity = identity_reader.recv()
+        assert worker_identity and not _attempt_stopped(worker_identity)
+        exit_writer.close()
+        owner.join(10)
+        assert owner.exitcode == 0
+        deadline = time.monotonic() + 10
+        while not _attempt_stopped(worker_identity) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert _attempt_stopped(worker_identity)
+    finally:
+        identity_reader.close()
+        exit_writer.close()
+        if owner.is_alive():
+            owner.terminate()
+            owner.join(10)
 
 
 def test_cancel_ends_actual_external_tool_process_tree(project):

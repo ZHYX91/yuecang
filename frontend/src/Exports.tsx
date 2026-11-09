@@ -1,19 +1,20 @@
 import { useEffect, useState } from 'react';
-import { post } from './api';
+import { api, post } from './api';
+import { useCollection } from './collections';
 import {
   Badge,
-  CollectionCoverage,
   Empty,
   Icon,
   Issues,
   JsonDetails,
   Pager,
+  Search,
   SectionHeading,
   date,
   shortId,
-  usePagination,
 } from './components';
 import { useWorkbench } from './store';
+import type { Revision } from './types';
 
 export default function Exports({
   preferredRevision,
@@ -22,16 +23,46 @@ export default function Exports({
   preferredRevision: string;
   openRevision: (id: string) => void;
 }) {
-  const { state, run, busy } = useWorkbench();
+  const { state, run, busy, remember } = useWorkbench();
   const [revisionId, setRevisionId] = useState(preferredRevision);
+  const [revisionQuery, setRevisionQuery] = useState('');
+  const [exportQuery, setExportQuery] = useState('');
   const [format, setFormat] = useState('markdown');
   const [allowDraft, setAllowDraft] = useState(false);
+  const [revisionError, setRevisionError] = useState<{ id: string; message: string } | null>(null);
   useEffect(() => {
     if (!revisionId && preferredRevision) setRevisionId(preferredRevision);
   }, [preferredRevision, revisionId]);
-  const revision = state.revisions.find((item) => item.id === revisionId);
+  const revisions = useCollection('revisions', { search: revisionQuery.trim() }, 20);
+  const revision =
+    revisions.items.find((item) => item.id === revisionId) ||
+    state.revisions.find((item) => item.id === revisionId);
+  const missingRevision = revisionId && !revision ? revisionId : '';
+  useEffect(() => {
+    if (!missingRevision) return;
+    const controller = new AbortController();
+    setRevisionError(null);
+    void api<Revision>(`/api/revisions/${encodeURIComponent(missingRevision)}?summary=true`, {
+      signal: controller.signal,
+    })
+      .then((summary) => {
+        if (!controller.signal.aborted) remember('revisions', [summary]);
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted)
+          setRevisionError({
+            id: missingRevision,
+            message: error instanceof Error ? error.message : '无法读取整理稿。',
+          });
+      });
+    return () => controller.abort();
+  }, [missingRevision, remember]);
+  const revisionChoices =
+    revision && !revisions.items.some((item) => item.id === revision.id)
+      ? [revision, ...revisions.items]
+      : revisions.items;
   const isDraft = revision && !['final', 'finalized', 'completed'].includes(revision.status);
-  const pagination = usePagination(state.exports, 15);
+  const pagination = useCollection('exports', { search: exportQuery.trim() }, 15);
   return (
     <>
       <SectionHeading
@@ -45,18 +76,29 @@ export default function Exports({
           <span>READY TO READ</span>
         </div>
         <div className="export-options">
+          <Search
+            value={revisionQuery}
+            onChange={(value) => {
+              setRevisionQuery(value);
+              revisions.setPage(0);
+            }}
+            placeholder="按书名或编号搜索整理稿"
+          />
           <label>
             整理稿
             <select
               aria-label="导出整理稿"
               value={revisionId}
               onChange={(event) => {
-                setRevisionId(event.target.value);
+                const id = event.target.value;
+                const selected = revisionChoices.find((item) => item.id === id);
+                if (selected) remember('revisions', [selected]);
+                setRevisionId(id);
                 setAllowDraft(false);
               }}
             >
               <option value="">选择要导出的修订</option>
-              {state.revisions.map((item) => (
+              {revisionChoices.map((item) => (
                 <option key={item.id} value={item.id}>
                   {item.metadata?.title ||
                     state.books.find((book) => book.id === item.book_id)?.title ||
@@ -67,6 +109,18 @@ export default function Exports({
               ))}
             </select>
           </label>
+          <Pager
+            page={revisions.page}
+            total={revisions.total}
+            size={revisions.size}
+            onChange={revisions.setPage}
+          />
+          <Issues
+            issues={[
+              revisions.error,
+              revisionError?.id === revisionId ? revisionError.message : '',
+            ].filter(Boolean)}
+          />
           <div className="format-choices">
             {[
               ['markdown', 'Markdown', '正文与资源，便于继续编辑'],
@@ -96,7 +150,7 @@ export default function Exports({
           <div className="button-group">
             <button
               className="button primary"
-              disabled={!revisionId || (isDraft && !allowDraft) || busy > 0}
+              disabled={!revision || (isDraft && !allowDraft) || busy > 0}
               onClick={() =>
                 void run('导出已提交，完成后可从下方下载。', () =>
                   post('/api/exports', {
@@ -110,7 +164,7 @@ export default function Exports({
               <Icon name="exports" size={17} />
               生成导出
             </button>
-            {revisionId && (
+            {revision && (
               <button className="button" onClick={() => openRevision(revisionId)}>
                 查看整理稿
               </button>
@@ -120,12 +174,22 @@ export default function Exports({
       </section>
       <div className="card-heading standalone">
         <h2>
-          导出记录 <span className="count">{state.exports.length}</span>
+          导出记录 <span className="count">{pagination.total}</span>
         </h2>
       </div>
-      <CollectionCoverage collection="exports" />
+      <div className="list-toolbar">
+        <Search
+          value={exportQuery}
+          onChange={(value) => {
+            setExportQuery(value);
+            pagination.setPage(0);
+          }}
+          placeholder="按书名或编号搜索导出记录"
+        />
+      </div>
+      <Issues issues={pagination.error ? [pagination.error] : []} />
       <div className="export-list">
-        {pagination.visible.map((item) => (
+        {pagination.items.map((item) => (
           <article key={item.id} className="card export-record">
             <div className="export-record-main">
               <span className="file-type">{(item.format || 'FILE').toUpperCase()}</span>
@@ -140,6 +204,11 @@ export default function Exports({
                 </p>
               </div>
               <Badge status={item.status || 'succeeded'} />
+              {item.revision_id && (
+                <button className="button small" onClick={() => openRevision(item.revision_id)}>
+                  查看关联整理稿
+                </button>
+              )}
               {(!item.status || ['succeeded', 'completed', 'ready'].includes(item.status)) && (
                 <a
                   className="button small"
@@ -158,14 +227,17 @@ export default function Exports({
           </article>
         ))}
       </div>
-      {!state.exports.length && (
-        <Empty title="还没有导出记录" icon="exports">
+      {!pagination.loading && !pagination.error && !pagination.items.length && (
+        <Empty
+          title={exportQuery.trim() ? '没有符合条件的导出记录' : '还没有导出记录'}
+          icon="exports"
+        >
           <p>选择整理稿和格式，生成第一份整理成果。</p>
         </Empty>
       )}
       <Pager
         page={pagination.page}
-        total={state.exports.length}
+        total={pagination.total}
         size={pagination.size}
         onChange={pagination.setPage}
       />

@@ -67,6 +67,14 @@ CREATE TABLE IF NOT EXISTS exports(id TEXT PRIMARY KEY,revision_id TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS candidates(id TEXT PRIMARY KEY,source_id TEXT NOT NULL REFERENCES sources(id),other_source_id TEXT,kind TEXT NOT NULL,evidence TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS reservations(id TEXT PRIMARY KEY,kind TEXT NOT NULL,bytes INTEGER NOT NULL CHECK(bytes>=0),owner TEXT NOT NULL,created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,object_id TEXT NOT NULL,payload TEXT NOT NULL,created REAL NOT NULL);
+INSERT OR IGNORE INTO meta VALUES('assignment_generation','0');
+INSERT OR IGNORE INTO meta VALUES('disposition_generation','0');
+CREATE TRIGGER IF NOT EXISTS assignments_insert_generation AFTER INSERT ON assignments BEGIN UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='assignment_generation'; END;
+CREATE TRIGGER IF NOT EXISTS assignments_update_generation AFTER UPDATE ON assignments BEGIN UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='assignment_generation'; END;
+CREATE TRIGGER IF NOT EXISTS assignments_delete_generation AFTER DELETE ON assignments BEGIN UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='assignment_generation'; END;
+CREATE TRIGGER IF NOT EXISTS dispositions_insert_generation AFTER INSERT ON dispositions BEGIN UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='disposition_generation'; END;
+CREATE TRIGGER IF NOT EXISTS dispositions_update_generation AFTER UPDATE ON dispositions BEGIN UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='disposition_generation'; END;
+CREATE TRIGGER IF NOT EXISTS dispositions_delete_generation AFTER DELETE ON dispositions BEGIN UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='disposition_generation'; END;
 """
 
 
@@ -321,6 +329,12 @@ class Project:
         if db is None:
             with self.connect() as connection:
                 return self.row(table, identifier, connection)
+        if not isinstance(identifier, str) or not identifier:
+            raise DomainError("identifier", "对象标识必须为非空文字")
+        try:
+            identifier.encode("utf-8")
+        except UnicodeError as exc:
+            raise DomainError("identifier", "对象标识包含无效字符") from exc
         row = db.execute(f"SELECT * FROM {table} WHERE id=?", (identifier,)).fetchone()
         if row is None:
             raise DomainError("not_found", "对象不存在", 404)

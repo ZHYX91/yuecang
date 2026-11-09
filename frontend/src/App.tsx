@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { api } from './api';
 import { Icon } from './components';
 import { useWorkbench } from './store';
-import { spanKey, type Page, type SelectedSpan } from './types';
+import { spanKey, type Book, type Page, type Revision, type SelectedSpan } from './types';
 import Sources from './Sources';
 import Books from './Books';
 import Workspace from './Workspace';
@@ -20,16 +21,20 @@ const navigation: { id: Page; name: string; hint: string }[] = [
   { id: 'settings', name: '项目设置', hint: '模型、存储与备份' },
 ];
 export default function App() {
-  const { state, ready, loading, connected, busy, refresh, notify, hasUnsavedEdits } =
+  const { state, ready, loading, connected, busy, refresh, notify, hasUnsavedEdits, remember } =
     useWorkbench();
   const [page, setPage] = useState<Page>('sources');
   const [visited, setVisited] = useState<Set<Page>>(new Set(['sources']));
   const [sourceId, setSourceId] = useState('');
   const [bookId, setBookId] = useState('');
+  const [browseBookId, setBrowseBookId] = useState('');
   const [revisionId, setRevisionId] = useState('');
   const [requestId, setRequestId] = useState('');
   const [selections, setSelections] = useState<SelectedSpan[]>([]);
+  const openingRevision = useRef<AbortController | null>(null);
+  useEffect(() => () => openingRevision.current?.abort(), []);
   const navigate = (next: Page) => {
+    openingRevision.current?.abort();
     setPage(next);
     setVisited((previous) => new Set(previous).add(next));
     window.scrollTo({ top: 0 });
@@ -58,21 +63,37 @@ export default function App() {
       [next[index], next[target]] = [next[target], next[index]];
       return next;
     });
-  const openRevision = (id: string) => {
+  const openRevision = async (id: string) => {
     if (hasUnsavedEdits && id !== revisionId) {
       notify('当前整理稿尚有未保存修改，请先保存或放弃修改。');
       navigate('workspace');
       return;
     }
-    const revision = state.revisions.find((item) => item.id === id);
-    if (revision) setBookId(revision.book_id);
-    setRevisionId(id);
-    navigate('workspace');
+    openingRevision.current?.abort();
+    const controller = new AbortController();
+    openingRevision.current = controller;
+    const init = { signal: controller.signal };
+    try {
+      const revision =
+        state.revisions.find((item) => item.id === id) ??
+        (await api<Revision>(`/api/revisions/${encodeURIComponent(id)}?summary=true`, init));
+      const book =
+        state.books.find((item) => item.id === revision.book_id) ??
+        (await api<Book>(`/api/books/${encodeURIComponent(revision.book_id)}`, init));
+      if (controller.signal.aborted) return;
+      remember('revisions', [revision]);
+      remember('books', [book]);
+      setBookId(book.id);
+      setRevisionId(revision.id);
+      navigate('workspace');
+    } catch (error) {
+      if (!controller.signal.aborted)
+        notify(error instanceof Error ? error.message : '无法打开整理稿。', 'error');
+    }
   };
-  const pending = state.proposals.filter(
-    (item) => !item.status || ['pending', 'proposed', 'waiting_review'].includes(item.status),
-  ).length;
-  const running = state.jobs.filter((item) => ['queued', 'running'].includes(item.status)).length;
+  const pending = state.state_counts?.proposals?.pending ?? 0;
+  const running =
+    (state.state_counts?.jobs?.queued ?? 0) + (state.state_counts?.jobs?.running ?? 0);
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -114,12 +135,13 @@ export default function App() {
             <div>
               <strong>{state.project?.name || '本地资料库'}</strong>
               <small>
-                {state.sources.length} 份来源 · {state.books.length} 本图书
+                {state.totals?.sources ?? state.sources.length} 份来源 ·{' '}
+                {state.totals?.books ?? state.books.length} 本图书
               </small>
             </div>
           </div>
           <p>保留来源，细致整理。</p>
-          <span className="version-label">LOCAL WORKBENCH · 0.2.0</span>
+          <span className="version-label">LOCAL WORKBENCH · 0.3.0</span>
         </div>
       </aside>
       <div className="main-shell">
@@ -182,8 +204,8 @@ export default function App() {
               {visited.has('books') && (
                 <div hidden={page !== 'books'}>
                   <Books
-                    selected={bookId}
-                    setSelected={setBookId}
+                    selected={browseBookId || bookId}
+                    setSelected={setBrowseBookId}
                     openWorkspace={(id, revision) => {
                       if (
                         hasUnsavedEdits &&
@@ -193,12 +215,12 @@ export default function App() {
                         navigate('workspace');
                         return;
                       }
+                      if (revision) {
+                        void openRevision(revision);
+                        return;
+                      }
                       setBookId(id);
-                      if (revision) setRevisionId(revision);
-                      else if (
-                        state.revisions.find((item) => item.id === revisionId)?.book_id !== id
-                      )
-                        setRevisionId('');
+                      if (id !== bookId) setRevisionId('');
                       navigate('workspace');
                     }}
                   />

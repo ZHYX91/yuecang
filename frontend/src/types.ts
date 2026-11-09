@@ -34,6 +34,8 @@ export interface WorkbenchState {
   jobs: RecordData[];
   exports: RecordData[];
   review_requests?: RecordData[];
+  assignment_generation: number;
+  disposition_generation: number;
   settings: RecordData;
   storage: RecordData;
   [key: string]: any;
@@ -59,6 +61,8 @@ export const emptyState: WorkbenchState = {
   settings: {},
   storage: {},
   review_requests: [],
+  assignment_generation: 0,
+  disposition_generation: 0,
 };
 export const textOf = (block: Block): string => {
   if (typeof block.text === 'string') return block.text;

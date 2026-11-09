@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import multiprocessing
+from multiprocessing.connection import wait as wait_connections
 import os
 import signal
 import socket
@@ -20,7 +21,7 @@ from yuecang.storage.project import DomainError, Project, canonical, digest, uid
 
 ACTIVE = {"queued", "running", "paused"}
 TERMINAL = {"succeeded", "failed", "cancelled", "needs_attention"}
-KINDS = {"import", "analyze", "export", "review", "backup"}
+KINDS = {"import", "analyze", "export", "review", "backup", "assignment_plan", "curation_plan"}
 
 
 def _process_stamp(pid):
@@ -403,6 +404,12 @@ def dispatch(project: Project, job):
                               expected_blocks_sha=payload.get("expected_blocks_sha"), job=job)
     if job["kind"] == "analyze":
         return wb.analyze(source_id=payload.get("source_id"), book_id=payload.get("book_id"), job=job)
+    if job["kind"] == "assignment_plan":
+        from yuecang.application.organization import Organization
+        return {"plan_id": Organization(wb).create(payload["source_ids"], job=job)["id"]}
+    if job["kind"] == "curation_plan":
+        from yuecang.application.curation import Curation
+        return {"plan_id": Curation(wb).create(**payload, job=job)["id"]}
     if job["kind"] == "export":
         return wb.export(payload["revision_id"], format=payload.get("format", "markdown"), allow_draft=bool(payload.get("allow_draft", False)), job=job)
     if job["kind"] == "review":
@@ -415,6 +422,21 @@ def dispatch(project: Project, job):
 
 
 _WINDOWS_TASK_JOB = None
+_WINDOWS_CONSOLE_HANDLER = None
+
+
+def _ignore_windows_console_interrupts():
+    import ctypes
+    from ctypes import wintypes
+
+    # A Ctrl+Break event can invoke the Win32 default termination handler
+    # without raising a Python exception. Only the API receives console input.
+    global _WINDOWS_CONSOLE_HANDLER
+    handler_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+    handler = handler_type(lambda event: event in (0, 1))  # CTRL_C_EVENT, CTRL_BREAK_EVENT
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    if kernel.SetConsoleCtrlHandler(handler, True):
+        _WINDOWS_CONSOLE_HANDLER = handler
 
 
 def _bind_process_tree():
@@ -493,6 +515,8 @@ def _watch_task_owner(project, job, stop, parent_id):
 def _child_execute(root, job, sender, parent_id, gate, callback=None):
     stop = threading.Event()
     try:
+        if os.name == "nt":
+            _ignore_windows_console_interrupts()
         _bind_process_tree()
         project = Project(root)
         threading.Thread(target=_watch_task_owner, args=(project, job, stop, parent_id), daemon=True).start()
@@ -507,7 +531,7 @@ def _child_execute(root, job, sender, parent_id, gate, callback=None):
         sender.close()
 
 
-def run_isolated_one(queue: JobQueue, *, max_seconds=3600, stop_event=None, callback=None):
+def run_isolated_one(queue: JobQueue, *, max_seconds=3600, stop_reader=None, callback=None):
     """Claim one job and execute in a bounded, killable spawned process."""
     job = queue.claim()
     if job is None:
@@ -538,7 +562,7 @@ def run_isolated_one(queue: JobQueue, *, max_seconds=3600, stop_event=None, call
                 break
             if not process.is_alive():
                 break
-            if stop_event is not None and stop_event.is_set():
+            if stop_reader is not None and wait_connections([stop_reader], timeout=0):
                 queue.pause(job["id"])
                 return queue.get(job["id"])
             if time.monotonic() - started > max_seconds:
@@ -594,18 +618,30 @@ def run_isolated_one(queue: JobQueue, *, max_seconds=3600, stop_event=None, call
         receiver.close()
 
 
-def worker_main(project, stop_event=None, *, once=False, poll_seconds=1):
-    queue = JobQueue(project)
-    queue.recover_expired()
-    while stop_event is None or not stop_event.is_set():
-        result = run_isolated_one(queue, stop_event=stop_event)
-        if once:
-            return result
-        if result is None:
-            if stop_event is not None:
-                stop_event.wait(poll_seconds)
-            else:
-                time.sleep(poll_seconds)
+def worker_main(project, stop_reader=None, *, once=False, poll_seconds=1):
+    if stop_reader is not None:
+        if os.name == "nt":
+            _ignore_windows_console_interrupts()
+        else:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        queue = JobQueue(project)
+        queue.recover_expired()
+        # Windows PipeConnection.poll can raise BrokenPipeError on EOF, while
+        # connection.wait treats the closed endpoint as ready on both platforms.
+        while stop_reader is None or not wait_connections([stop_reader], timeout=0):
+            result = run_isolated_one(queue, stop_reader=stop_reader)
+            if once:
+                return result
+            if result is None:
+                if stop_reader is not None:
+                    if wait_connections([stop_reader], timeout=poll_seconds):
+                        break
+                else:
+                    time.sleep(poll_seconds)
+    finally:
+        if stop_reader is not None:
+            stop_reader.close()
 
 
 if __name__ == "__main__":

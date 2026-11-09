@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react';
 import { api, post } from './api';
+import { useCollection } from './collections';
 import {
   Badge,
-  CollectionCoverage,
   Empty,
   Issues,
   JsonDetails,
   Pager,
+  Search,
   SectionHeading,
   shortId,
-  usePagination,
 } from './components';
 import { useWorkbench } from './store';
 import type { RecordData } from './types';
@@ -28,7 +28,9 @@ export default function Review({
   const [responseText, setResponseText] = useState('');
   const [requestError, setRequestError] = useState('');
   const [filter, setFilter] = useState('pending');
+  const [query, setQuery] = useState('');
   const [showRequest, setShowRequest] = useState(!!requestId);
+  const [requestQuery, setRequestQuery] = useState('');
   useEffect(() => {
     if (!requestId) {
       setRequest(null);
@@ -39,19 +41,29 @@ export default function Review({
     setRequestError('');
     setShowRequest(true);
     const controller = new AbortController();
-    void api(`/api/review-requests/${requestId}`, { signal: controller.signal })
-      .then((data) => setRequest(data))
+    void api(`/api/review-requests/${encodeURIComponent(requestId)}`, { signal: controller.signal })
+      .then((data) => {
+        if (!controller.signal.aborted) setRequest(data);
+      })
       .catch((error) => {
         if (error.name !== 'AbortError') setRequestError(error.message);
       });
     return () => controller.abort();
   }, [requestId]);
-  const pending = (proposal: RecordData) =>
-    !proposal.status || ['pending', 'proposed', 'waiting_review'].includes(proposal.status);
-  const filtered = state.proposals.filter(
-    (item) => filter === 'all' || (filter === 'pending' ? pending(item) : item.status === filter),
+  const pagination = useCollection(
+    'proposals',
+    {
+      state: filter === 'all' ? undefined : filter,
+      search: query.trim(),
+    },
+    12,
   );
-  const pagination = usePagination(filtered, 12);
+  const requests = useCollection(
+    'review_requests',
+    { search: requestQuery.trim() },
+    15,
+    showRequest,
+  );
   const submitResponse = async () => {
     let response: unknown;
     try {
@@ -63,7 +75,12 @@ export default function Review({
     const result = await run('响应已校验并转为校订提案。', () =>
       post(`/api/review-requests/${requestId}/response`, { response }),
     );
-    if (result) setResponseText('');
+    if (result) {
+      setResponseText('');
+      setRequest((previous) =>
+        previous?.id === requestId ? { ...previous, status: 'completed' } : previous,
+      );
+    }
   };
   const downloadRequest = () => {
     const url = URL.createObjectURL(
@@ -100,15 +117,24 @@ export default function Review({
           <p className="muted">
             在整理稿中创建离线审阅请求，将模型或人工处理结果导入这里。所有范围与证据都会再次校验。
           </p>
+          <Search
+            value={requestQuery}
+            onChange={(value) => {
+              setRequestQuery(value);
+              requests.setPage(0);
+            }}
+            placeholder="搜索审阅请求或修订编号"
+          />
           <label>
             审阅请求
             <select
               aria-label="审阅请求"
+              disabled={busy > 0}
               value={requestId}
               onChange={(event) => setRequestId(event.target.value)}
             >
               <option value="">选择审阅请求</option>
-              {(state.review_requests || []).map((item) => (
+              {requests.items.map((item) => (
                 <option key={item.id} value={item.id}>
                   {state.revisions.find((r) => r.id === item.revision_id)?.metadata?.title ||
                     '整理稿'}
@@ -126,13 +152,18 @@ export default function Review({
                     '待处理'}
                 </option>
               ))}
-              {requestId &&
-                !(state.review_requests || []).some((item) => item.id === requestId) && (
-                  <option value={requestId}>{shortId(requestId)}</option>
-                )}
+              {requestId && !requests.items.some((item) => item.id === requestId) && (
+                <option value={requestId}>{shortId(requestId)}</option>
+              )}
             </select>
           </label>
-          <Issues issues={requestError ? [requestError] : []} />
+          <Pager
+            page={requests.page}
+            total={requests.total}
+            size={requests.size}
+            onChange={requests.setPage}
+          />
+          <Issues issues={[requests.error, requestError].filter(Boolean)} />
           {request && (
             <>
               <div className="inline-banner warm review-batch">
@@ -146,9 +177,7 @@ export default function Review({
                   </p>
                 </div>
                 <Badge
-                  status={
-                    state.review_requests?.find((r) => r.id === requestId)?.status || request.status
-                  }
+                  status={requests.items.find((r) => r.id === requestId)?.status || request.status}
                 />
               </div>
               <details className="provenance-details">
@@ -207,6 +236,14 @@ export default function Review({
         </section>
       )}
       <div className="list-toolbar">
+        <Search
+          value={query}
+          onChange={(value) => {
+            setQuery(value);
+            pagination.setPage(0);
+          }}
+          placeholder="搜索修订或校订编号"
+        />
         <div className="filter-tabs">
           {[
             ['pending', '待审阅'],
@@ -223,18 +260,17 @@ export default function Review({
               }}
             >
               {label}
-              {value === 'pending' && <span>{state.proposals.filter(pending).length}</span>}
+              {value === 'pending' && <span>{state.state_counts?.proposals?.pending ?? 0}</span>}
             </button>
           ))}
         </div>
-        <span className="muted">{filtered.length} 条校订</span>
+        <span className="muted">{pagination.total} 条校订</span>
       </div>
-      <CollectionCoverage collection="proposals" />
+      <Issues issues={pagination.error ? [pagination.error] : []} />
       <div className="proposal-list">
-        {pagination.visible.map((proposal) => {
-          const revision = state.revisions.find(
-            (item) => item.id === (proposal.revision_id || proposal.base_revision_id),
-          );
+        {pagination.items.map((proposal) => {
+          const revisionId = proposal.revision_id || proposal.base_revision_id;
+          const revision = state.revisions.find((item) => item.id === revisionId);
           const book = state.books.find(
             (item) => item.id === (proposal.book_id || revision?.book_id),
           );
@@ -278,12 +314,12 @@ export default function Review({
                     : ''}
                 </div>
                 <div className="button-group">
-                  {revision && (
-                    <button className="button small" onClick={() => openRevision(revision.id)}>
+                  {revisionId && (
+                    <button className="button small" onClick={() => openRevision(revisionId)}>
                       查看整理稿
                     </button>
                   )}
-                  {pending(proposal) && (
+                  {proposal.status === 'pending' && (
                     <>
                       <button
                         className="button small"
@@ -318,9 +354,9 @@ export default function Review({
           );
         })}
       </div>
-      {!filtered.length && (
+      {!pagination.loading && !pagination.error && !pagination.items.length && (
         <Empty
-          title={filter === 'pending' ? '没有待审阅的校订' : '没有符合条件的记录'}
+          title={filter === 'pending' && !query.trim() ? '没有待审阅的校订' : '没有符合条件的记录'}
           icon="review"
         >
           <p>打开整理稿，创建AI或离线审阅请求，建议会出现在这里。</p>
@@ -328,7 +364,7 @@ export default function Review({
       )}
       <Pager
         page={pagination.page}
-        total={filtered.length}
+        total={pagination.total}
         size={pagination.size}
         onChange={pagination.setPage}
       />

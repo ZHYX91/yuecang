@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import { api, post } from './api';
 import {
   Badge,
-  CollectionCoverage,
   Empty,
   Icon,
   JsonDetails,
@@ -11,9 +10,10 @@ import {
   Search,
   SectionHeading,
   bytes,
-  usePagination,
 } from './components';
+import { useCollection } from './collections';
 import { SourcePanel } from './SourcePanel';
+import OrganizationPanel from './OrganizationPanel';
 import { useWorkbench } from './store';
 import {
   derivationOf,
@@ -39,8 +39,10 @@ export default function Sources({
   remove: (key: string) => void;
   openWorkspace: () => void;
 }) {
-  const { state, run, busy, notify } = useWorkbench();
+  const { state, run, busy, notify, remember } = useWorkbench();
   const [query, setQuery] = useState('');
+  const [organizing, setOrganizing] = useState(false);
+  const [organizationIds, setOrganizationIds] = useState<string[]>([]);
   const [dragging, setDragging] = useState(false);
   const [analysis, setAnalysis] = useState<{ sourceId: string; result: RecordData } | null>(null);
   const [encoding, setEncoding] = useState('auto');
@@ -48,6 +50,7 @@ export default function Sources({
   const [importOptions, setImportOptions] = useState<RecordData | null>(null);
   const [optionsError, setOptionsError] = useState('');
   const input = useRef<HTMLInputElement>(null);
+  const preview = useRef<HTMLElement>(null);
   useEffect(() => {
     const controller = new AbortController();
     void api('/api/import-options', { signal: controller.signal })
@@ -57,10 +60,7 @@ export default function Sources({
       });
     return () => controller.abort();
   }, []);
-  const filtered = state.sources.filter((source) =>
-    nameOf(source).toLowerCase().includes(query.toLowerCase()),
-  );
-  const pagination = usePagination(filtered, 15);
+  const pagination = useCollection('sources', { search: query.trim() }, 15);
   const candidates = (state.candidates || []).filter(
     (item: RecordData) =>
       item.source_id === selected &&
@@ -200,12 +200,12 @@ export default function Sources({
       <p className="format-note">
         Markdown 配图需要作为关联资源提供，缺失时会明确标记；扫描 PDF 的文字识别需要本机 OCR 工具。
       </p>
-      <CollectionCoverage collection="sources" />
       <div className="sources-layout">
         <section className="card source-list-card">
           <div className="card-heading">
             <h2>
-              来源文件 <span className="count">{state.sources.length}</span>
+              来源文件{' '}
+              <span className="count">{state.totals?.sources ?? state.sources.length}</span>
             </h2>
             <Search
               value={query}
@@ -216,48 +216,90 @@ export default function Sources({
               placeholder="查找文件"
             />
           </div>
-          {filtered.length ? (
+          <div className="guided-actions">
+            <button
+              className="button small"
+              aria-expanded={organizing}
+              onClick={() => setOrganizing(!organizing)}
+            >
+              批量归属{organizationIds.length ? `（已选 ${organizationIds.length} 份）` : ''}
+            </button>
+            {organizing && organizationIds.length > 0 && (
+              <button className="button small" onClick={() => setOrganizationIds([])}>
+                清空选择
+              </button>
+            )}
+          </div>
+          {organizing && <p className="field-help">可跨页选择，单次最多检查 20 份来源。</p>}
+          {pagination.error && <Issues issues={[pagination.error]} />}
+          {pagination.loading && (
+            <p role="status" className="field-help">
+              正在读取来源…
+            </p>
+          )}
+          {pagination.items.length ? (
             <div className="source-list">
-              {pagination.visible.map((source) => (
-                <button
-                  key={source.id}
-                  data-source-id={source.id}
-                  className={`source-list-row ${selected === source.id ? 'active' : ''}`}
-                  onClick={() => setSelected(source.id)}
-                >
-                  <span className="file-type">
-                    {(source.extension || fileNameOf(source).split('.').pop() || 'FILE')
-                      .replace('.', '')
-                      .slice(0, 4)
-                      .toUpperCase()}
-                  </span>
-                  <span className="source-row-main">
-                    <strong title={nameOf(source)}>{nameOf(source)}</strong>
-                    <small>
-                      {derivationOf(source) ||
-                        (source.byte_size !== undefined || source.size !== undefined
-                          ? bytes(source.byte_size ?? source.size)
-                          : '大小待统计')}{' '}
-                      · {source.block_count ?? source.blocks_count ?? '—'} 个内容块
-                    </small>
-                  </span>
-                  <Badge status={source.status} />
-                </button>
+              {pagination.items.map((source) => (
+                <div className="guided-source-row" key={source.id}>
+                  {organizing && (
+                    <input
+                      type="checkbox"
+                      checked={organizationIds.includes(source.id)}
+                      disabled={
+                        organizationIds.length >= 20 && !organizationIds.includes(source.id)
+                      }
+                      aria-label={`选择归属检查来源 ${nameOf(source)}`}
+                      onChange={(event) =>
+                        setOrganizationIds((current) =>
+                          event.target.checked
+                            ? [...current, source.id]
+                            : current.filter((id) => id !== source.id),
+                        )
+                      }
+                    />
+                  )}
+                  <button
+                    data-source-id={source.id}
+                    className={`source-list-row ${selected === source.id ? 'active' : ''}`}
+                    onClick={() => {
+                      remember('sources', [source]);
+                      setSelected(source.id);
+                    }}
+                  >
+                    <span className="file-type">
+                      {(source.extension || fileNameOf(source).split('.').pop() || 'FILE')
+                        .replace('.', '')
+                        .slice(0, 4)
+                        .toUpperCase()}
+                    </span>
+                    <span className="source-row-main">
+                      <strong title={nameOf(source)}>{nameOf(source)}</strong>
+                      <small>
+                        {derivationOf(source) ||
+                          (source.byte_size !== undefined || source.size !== undefined
+                            ? bytes(source.byte_size ?? source.size)
+                            : '大小待统计')}{' '}
+                        · {source.block_count ?? source.blocks_count ?? '—'} 个内容块
+                      </small>
+                    </span>
+                    <Badge status={source.status} />
+                  </button>
+                </div>
               ))}
             </div>
-          ) : (
+          ) : !pagination.loading && !pagination.error ? (
             <Empty title={query ? '没有找到文件' : '来源库还是空的'} icon="sources">
               <p>{query ? '尝试更短的名称。' : '导入一份文件，开始建立你的书库。'}</p>
             </Empty>
-          )}
+          ) : null}
           <Pager
             page={pagination.page}
-            total={filtered.length}
+            total={pagination.total}
             size={pagination.size}
             onChange={pagination.setPage}
           />
         </section>
-        <section className="card source-preview">
+        <section className="card source-preview" ref={preview}>
           <div className="card-heading">
             <h2>来源预览</h2>
             {selected && (
@@ -313,6 +355,16 @@ export default function Sources({
             remove={remove}
           />
         </section>
+      </div>
+      <div hidden={!organizing}>
+        <OrganizationPanel
+          sourceIds={organizationIds}
+          onOpenSource={(id, name) => {
+            remember('sources', [{ id, name }]);
+            setSelected(id);
+            preview.current?.scrollIntoView({ block: 'start' });
+          }}
+        />
       </div>
     </>
   );

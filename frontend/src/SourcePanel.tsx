@@ -4,6 +4,7 @@ import { useWorkbench } from './store';
 import { Badge, Empty, Issues, Pager, Search, usePagination } from './components';
 import SourceRecovery from './SourceRecovery';
 import SourceInspection from './SourceInspection';
+import AssignmentEditor from './AssignmentEditor';
 import {
   codePointOffset,
   characterLength,
@@ -43,9 +44,7 @@ export function SourcePanel({
   compact?: boolean;
 }) {
   const { state, run, busy } = useWorkbench();
-  const assignmentCount = (state.assignments || []).filter(
-    (item: any) => item.source_id === sourceId,
-  ).length;
+  const dispositionGeneration = state.disposition_generation;
   const [reloadKey, setReloadKey] = useState(0);
   const [source, setSource] = useState<Source | null>(null);
   const [blocks, setBlocks] = useState<Block[]>([]);
@@ -71,7 +70,7 @@ export function SourcePanel({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [sourceId, reloadKey, assignmentCount]);
+  }, [sourceId, reloadKey, dispositionGeneration]);
   const filtered = blocks.filter(
     (block) => !query || textOf(block).toLowerCase().includes(query.toLowerCase()),
   );
@@ -124,6 +123,7 @@ export function SourcePanel({
         </div>
       )}
       <Issues issues={source?.issues} />
+      {!compact && source && <AssignmentEditor key={sourceId} sourceId={sourceId} />}
       {!compact &&
         source &&
         (['txt', 'markdown'].includes(source.metadata?.source_format) ||

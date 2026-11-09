@@ -20,7 +20,7 @@ TMP_PREFIX = "maintenance_tmp:"
 PENDING_GC = "maintenance_pending_gc"
 TERMINAL = {"succeeded", "failed", "cancelled"}
 TEMP_ROLES = {"temporary", "cache", "scratch"}
-REBUILDABLE_KINDS = {"upload", "extraction", "resource", "ai_request", "ai_response", "cache"}
+REBUILDABLE_KINDS = {"upload", "extraction", "resource", "ai_request", "ai_response", "cache", "assignment_plan", "curation_plan"}
 MAX_TREE_FILES = 100_000
 
 
@@ -134,7 +134,7 @@ def _db_identity(db, marker):
         raise DomainError("unknown_database", "无法验证项目数据库") from exc
 
 
-def _direct_object_shas(db, *, require_review_refs=False):
+def _direct_object_shas(db, *, require_owner_refs=False):
     result = {row[0] for row in db.execute("""
         SELECT asset_sha FROM sources UNION SELECT blocks_sha FROM sources WHERE blocks_sha IS NOT NULL
         UNION SELECT document_sha FROM revisions UNION SELECT payload_sha FROM review_requests
@@ -150,7 +150,7 @@ def _direct_object_shas(db, *, require_review_refs=False):
                 sha = evidence[f"{role}_sha"]
                 if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
                     raise ValueError("invalid review object hash")
-                if require_review_refs and not db.execute(
+                if require_owner_refs and not db.execute(
                     "SELECT 1 FROM object_refs WHERE owner='source_review' AND owner_id=? AND sha=? AND role=?",
                     (row["id"], sha, role),
                 ).fetchone():
@@ -158,12 +158,26 @@ def _direct_object_shas(db, *, require_review_refs=False):
                 result.add(sha)
         except (KeyError, TypeError, ValueError) as exc:
             raise DomainError("object_reference_missing", "来源核查记录的对象引用无效") from exc
+    for row in db.execute("SELECT id,kind,evidence FROM candidates WHERE kind IN ('assignment_plan','curation_plan')"):
+        try:
+            evidence = json.loads(row["evidence"])
+            sha = evidence["payload_sha"]
+            if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+                raise ValueError("invalid plan payload")
+            if require_owner_refs and not db.execute(
+                "SELECT 1 FROM object_refs WHERE owner=? AND owner_id=? AND sha=? AND role='payload'",
+                (row["kind"], row["id"], sha),
+            ).fetchone():
+                raise ValueError("missing plan reference")
+            result.add(sha)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DomainError("object_reference_missing", "整理计划的冻结对象引用无效") from exc
     return result
 
 
 def _required_objects(db):
     refs = {row[0] for row in db.execute("SELECT DISTINCT sha FROM object_refs")}
-    if _direct_object_shas(db, require_review_refs=True) - refs:
+    if _direct_object_shas(db, require_owner_refs=True) - refs:
         raise DomainError("object_reference_missing", "原件、修订或审阅对象缺少保留引用")
     objects = {row["sha"]: dict(row) for row in db.execute("SELECT * FROM objects WHERE sha IN (SELECT sha FROM object_refs)")}
     if set(objects) != refs:

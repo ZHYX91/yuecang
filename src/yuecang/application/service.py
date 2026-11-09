@@ -29,6 +29,7 @@ class Workbench:
     def state(self):
         out = {}
         with self.project.connect() as db:
+            db.execute("BEGIN")
             for name in ("sources", "books", "editions", "branches", "revisions", "proposals", "jobs", "exports", "candidates", "assignments", "review_requests"):
                 rows = db.execute(f"SELECT * FROM {name} ORDER BY rowid DESC LIMIT 1000").fetchall()
                 out[name] = [unpack(row) for row in rows]
@@ -36,17 +37,70 @@ class Workbench:
             for job in out["jobs"]:
                 job.pop("token", None)
                 job.pop("payload", None)
+                job.pop("checkpoint", None)
+            out["state_counts"] = {
+                table: dict(db.execute(f"SELECT state,count(*) FROM {table} GROUP BY state"))
+                for table in ("jobs", "proposals")
+            }
             out["event_id"] = db.execute("SELECT coalesce(max(id),0) FROM events").fetchone()[0]
+            for generation in ("assignment_generation", "disposition_generation"):
+                out[generation] = int(db.execute("SELECT value FROM meta WHERE key=?", (generation,)).fetchone()[0])
         out["settings"], out["storage"] = self.project.settings(), self.project.storage_status()
         return out
 
-    def list_page(self, table, *, offset=0, limit=100, search=""):
+    def list_page(self, table, *, offset=0, limit=100, search="", source_id=None, book_id=None,
+                  edition_id=None, kind=None, state=None):
         if table not in {"sources", "books", "jobs", "revisions", "exports", "proposals", "review_requests", "editions", "branches", "candidates", "assignments"}:
             raise DomainError("collection", "未知列表")
         limit, offset = min(max(int(limit), 1), 500), max(0, int(offset))
-        field = {"sources": "name", "books": "title"}.get(table)
-        where, args = (f" WHERE {field} LIKE ?", [f"%{search}%"]) if search and field else ("", [])
+        if offset >= 2**63:
+            raise DomainError("collection_page", "分页偏移量超出支持范围")
+        conditions, args = [], []
+        searchable = {
+            "sources": ["name", "json_extract(metadata,'$.title')"], "books": ["title", "author"],
+            "editions": ["label", "translator"], "branches": ["name"],
+            "revisions": ["id", "json_extract(metadata,'$.title')"], "jobs": ["id", "kind"],
+            "exports": ["id", "revision_id", "(SELECT json_extract(metadata,'$.title') FROM revisions WHERE id=exports.revision_id)"],
+            "proposals": ["id", "revision_id"], "review_requests": ["id", "revision_id"],
+        }.get(table, [])
+        if search and searchable:
+            conditions.append("(" + " OR ".join(f"{field} LIKE ? ESCAPE '\\'" for field in searchable) + ")")
+            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            args.extend([f"%{escaped}%"] * len(searchable))
+        available = {
+            "sources": set(), "books": set(), "jobs": {"kind", "state"}, "revisions": {"book_id", "edition_id"},
+            "exports": set(), "proposals": {"state"}, "review_requests": set(), "editions": {"book_id"},
+            "branches": {"book_id"}, "candidates": {"source_id", "kind", "state"},
+            "assignments": {"source_id", "book_id", "edition_id"},
+        }
+        requested = {"source_id": source_id, "book_id": book_id, "edition_id": edition_id, "kind": kind, "state": state}
+        if table == "sources" and (book_id or edition_id):
+            scope = ["a.source_id=sources.id"]
+            for field in ("book_id", "edition_id"):
+                if requested[field]:
+                    scope.append(f"a.{field}=?")
+                    args.append(requested[field])
+                    requested[field] = None
+            conditions.append("EXISTS(SELECT 1 FROM assignments a WHERE " + " AND ".join(scope) + ")")
+        for field, value in requested.items():
+            if value is None:
+                continue
+            if field not in available[table]:
+                raise DomainError("collection_filter", "该列表不支持此筛选条件")
+            if table == "jobs" and field == "state":
+                from yuecang.jobs import ACTIVE, TERMINAL
+                valid_states = ACTIVE | TERMINAL
+                states = value.split(",", maxsplit=len(valid_states))
+                if len(states) > len(valid_states) or not set(states) <= valid_states:
+                    raise DomainError("collection_filter", "任务状态筛选包含无效值")
+                conditions.append("state IN (" + ",".join("?" for _ in states) + ")")
+                args.extend(states)
+            else:
+                conditions.append(f"{field}=?")
+                args.append(value)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
         with self.project.connect() as db:
+            db.execute("BEGIN")
             total = db.execute(f"SELECT count(*) FROM {table}{where}", args).fetchone()[0]
             rows = db.execute(f"SELECT * FROM {table}{where} ORDER BY rowid DESC LIMIT ? OFFSET ?", [*args, limit, offset]).fetchall()
         items = [unpack(r) for r in rows]
@@ -54,6 +108,7 @@ class Workbench:
             r.pop("token", None)
             if table == "jobs":
                 r.pop("payload", None)
+                r.pop("checkpoint", None)
         return {"items": items, "total": total, "offset": offset, "next_offset": offset + limit if offset + limit < total else None}
 
     def source(self, source_id):
@@ -65,13 +120,15 @@ class Workbench:
             row["dispositions"] = [dict(x) for x in db.execute("SELECT * FROM dispositions WHERE source_id=? ORDER BY block_id,start", (source_id,))]
         return row
 
-    def revision(self, revision_id):
+    def revision(self, revision_id, *, summary=False):
         row = unpack(self.project.row("revisions", revision_id))
-        row["blocks"] = self.project.read_json(row["document_sha"])
+        if not summary:
+            row["blocks"] = self.project.read_json(row["document_sha"])
         with self.project.connect() as db:
             branch = db.execute("SELECT id FROM branches WHERE head_revision_id=?", (revision_id,)).fetchone()
             row["branch_id"] = branch[0] if branch else None
-            row["changes"] = [unpack(r) for r in db.execute("SELECT * FROM operations WHERE output_revision=?", (revision_id,))]
+            if not summary:
+                row["changes"] = [unpack(r) for r in db.execute("SELECT * FROM operations WHERE output_revision=?", (revision_id,))]
         return row
 
     def _job_guard(self, db, job):
@@ -258,9 +315,12 @@ class Workbench:
         edition_id = uid()
         with self.project.transaction() as db:
             db.execute("INSERT INTO editions(id,book_id,label,language,translator) VALUES(?,?,?,?,?)", (edition_id, book_id, label, language, translator))
+            self.project.event(db, "edition.created", edition_id, {"book_id": book_id})
         return self.project.row("editions", edition_id)
 
     def _edition(self, book_id, edition_id=None):
+        if not isinstance(book_id, str) or edition_id is not None and not isinstance(edition_id, str):
+            raise DomainError("edition", "图书及版本标识必须为文字")
         if edition_id:
             ed = self.project.row("editions", edition_id)
         else:
@@ -276,12 +336,15 @@ class Workbench:
     def _selections(self, selections):
         if not isinstance(selections, list) or not selections:
             raise DomainError("selection", "请至少选择一个来源片段")
-        sources, normalized = {}, []
+        sources, blocks_by_source, normalized = {}, {}, []
         for item in selections:
+            if not isinstance(item, dict) or any(not isinstance(item.get(key), str) or not item[key] for key in ("source_id", "block_id")):
+                raise DomainError("selection", "来源片段须包含有效来源和内容块标识")
             sid = item.get("source_id")
             if sid not in sources:
                 sources[sid] = self.source(sid)
-            block = next((b for b in sources[sid]["blocks"] if b["id"] == item.get("block_id")), None)
+                blocks_by_source[sid] = {b["id"]: b for b in sources[sid]["blocks"]}
+            block = blocks_by_source[sid].get(item["block_id"])
             if block is None:
                 raise DomainError("source_block", "来源内容块不存在")
             start, end = item.get("start", 0), item.get("end", len(block["text"]))
@@ -340,25 +403,46 @@ class Workbench:
             self._dispose(db, source_id, block_id, start, end, kind, reason)
         return {"ok": True}
 
-    def assemble(self, book_id, selections, edition_id=None, title=None, job=None, allow_composite=False):
+    def assemble(self, book_id, selections, edition_id=None, title=None, job=None, allow_composite=False,
+                 *, precondition=None, record_extra=None, assign_selected=True, commit_hook=None, selection_editions=None):
         if type(allow_composite) is not bool:
             raise DomainError("assembly_policy", "综合整理版选项必须为布尔值")
+        if title is not None:
+            if not isinstance(title, str):
+                raise DomainError("assembly_title", "整理稿标题必须为文字")
+            try:
+                title.encode("utf-8")
+            except UnicodeError as exc:
+                raise DomainError("assembly_title", "整理稿标题包含无效字符") from exc
         book = self.project.row("books", book_id)
         edition = self._edition(book_id, edition_id)
         selected = self._selections(selections)
+        if selection_editions is not None and (not allow_composite or assign_selected or precondition is None
+                                              or len(selection_editions) != len(selected)):
+            raise DomainError("assembly_provenance", "选稿来源版本与组稿方案不一致")
+        frozen_editions = {}
+        plan_editions = (record_extra or {}).get("source_editions", {})
         blocks, issues, seen = [], [], set()
-        for s in selected:
+        for i, s in enumerate(selected):
             key = (s["source_id"], s["block_id"], s["start"], s["end"])
             if key in seen:
                 raise DomainError("duplicate_selection", "同一来源范围被重复选入，请去除重复")
             seen.add(key)
-            with self.project.connect() as db:
-                other = db.execute("SELECT edition_id FROM assignments WHERE source_id=? AND block_id=? AND start<? AND end>? AND edition_id<>?", (s["source_id"], s["block_id"], s["end"], s["start"], edition["id"])).fetchall()
-            if other:
-                issues.append({"code": "edition_conflict", "severity": "warning" if allow_composite else "blocking", "message": "已明确选择综合整理版；保留其他版本归属和原始出处" if allow_composite else "所选片段已关联其他版本，请明确是否制作综合整理版", "source_id": s["source_id"], "other_edition_ids": sorted({r["edition_id"] for r in other})})
             block = copy.deepcopy(s["block"])
             block.update(id=uid(), text=block["text"][s["start"]:s["end"]], source_id=s["source_id"], source_span={k: s[k] for k in ("source_id", "block_id", "start", "end")})
             block["provenance"] = [{"kind": "copy", "output_start": 0, "output_end": len(block["text"]), "source": block["source_span"], "text_sha256": hashlib.sha256(block["text"].encode()).hexdigest()}]
+            if selection_editions is not None:
+                ranges = selection_editions[i]
+                if not ranges or any(r["edition_id"] not in plan_editions or not s["start"] <= r["start"] <= r["end"] <= s["end"] for r in ranges):
+                    raise DomainError("assembly_provenance", "选稿来源版本与组稿方案不一致")
+                # These coordinates describe the source at assembly time. They
+                # remain useful even after later edits change the output block.
+                block["source_edition_ranges"] = [{"source_id": s["source_id"], "block_id": s["block_id"],
+                                                   "start": r["start"], "end": r["end"], "edition_id": r["edition_id"]}
+                                                  for r in ranges]
+                for r in ranges:
+                    edition_id_at_assembly = r["edition_id"]
+                    frozen_editions[edition_id_at_assembly] = plan_editions[edition_id_at_assembly]
             blocks.append(block)
             for issue in s["source"]["issues"]:
                 marked = copy.deepcopy(issue)
@@ -368,15 +452,33 @@ class Workbench:
                     issues.append(marked)
         rev_id, branch_id = uid(), uid()
         metadata = {"title": title or book["title"], "author": book["author"], "language": edition["language"], "edition": edition["label"], "translator": edition["translator"], "source_ids": sorted({s["source_id"] for s in selected}), "completeness": "known_sources_only", "assembly_policy": "composite-confirmed" if allow_composite else "single-edition"}
+        if frozen_editions:
+            metadata["source_editions"] = frozen_editions
         sha = self.project.put_json(blocks, "revision")
         with self.project.transaction() as db:
             self._job_guard(db, job)
+            if precondition:
+                precondition(db)
+            for selected_span in selected:
+                other = db.execute("SELECT edition_id FROM assignments WHERE source_id=? AND block_id=? AND ((start<? AND end>?) OR (start=end AND start=? AND ?=?)) AND edition_id<>?",
+                                   (selected_span["source_id"], selected_span["block_id"], selected_span["end"], selected_span["start"],
+                                    selected_span["start"], selected_span["start"], selected_span["end"], edition["id"])).fetchall()
+                if other:
+                    issues.append({"code": "edition_conflict", "severity": "warning" if allow_composite else "blocking",
+                                   "message": "已明确选择综合整理版；保留其他版本归属和原始出处" if allow_composite else "所选片段已关联其他版本，请明确是否制作综合整理版",
+                                   "source_id": selected_span["source_id"], "other_edition_ids": sorted({r["edition_id"] for r in other})})
             db.execute("INSERT INTO revisions VALUES(?,?,?,?,?,?,?,?,?)", (rev_id, book_id, edition["id"], None, sha, canonical(metadata), "draft", canonical(issues), time.time()))
             db.execute("INSERT INTO branches VALUES(?,?,?,?,?)", (branch_id, book_id, "整理稿 " + time.strftime("%m-%d %H:%M"), rev_id, 0))
-            self._assign(db, book_id, edition["id"], selected)
+            if assign_selected:
+                self._assign(db, book_id, edition["id"], selected)
             self._revision_refs(db, rev_id, sha, blocks)
-            db.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?)", (uid(), None, rev_id, "user", None, canonical({"type": "assemble", "selections": [{k: s[k] for k in ("source_id", "block_id", "start", "end")} for s in selected]}), time.time()))
+            operation = {"type": "assemble", "selections": [{k: s[k] for k in ("source_id", "block_id", "start", "end")} for s in selected]}
+            if record_extra is not None:
+                operation["guided_plan"] = record_extra
+            db.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?)", (uid(), None, rev_id, "user", None, canonical(operation), time.time()))
             self.project.event(db, "revision.created", rev_id)
+            if commit_hook:
+                commit_hook(db, {"revision_id": rev_id, "branch_id": branch_id})
         return {"revision_id": rev_id, "branch_id": branch_id, "revision": self.revision(rev_id), "branch": self.project.row("branches", branch_id)}
 
     def _revision_refs(self, db, revision_id, sha, blocks):

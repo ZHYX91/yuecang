@@ -1,8 +1,8 @@
-import { useState } from 'react';
-import { post } from './api';
+import { useEffect, useState } from 'react';
+import { api, post } from './api';
+import { useCollection } from './collections';
 import {
   Badge,
-  CollectionCoverage,
   Empty,
   Icon,
   JsonDetails,
@@ -10,9 +10,9 @@ import {
   Search,
   SectionHeading,
   shortId,
-  usePagination,
 } from './components';
 import { useWorkbench } from './store';
+import type { Book } from './types';
 
 export default function Books({
   selected,
@@ -23,7 +23,7 @@ export default function Books({
   setSelected: (id: string) => void;
   openWorkspace: (bookId: string, revisionId?: string) => void;
 }) {
-  const { state, run, busy } = useWorkbench();
+  const { state, run, busy, remember } = useWorkbench();
   const [query, setQuery] = useState('');
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState('');
@@ -32,19 +32,36 @@ export default function Books({
   const [language, setLanguage] = useState('zh');
   const [translator, setTranslator] = useState('');
   const [analysis, setAnalysis] = useState<{ bookId: string; result: unknown } | null>(null);
-  const filtered = state.books.filter((book) =>
-    `${book.title} ${book.author || ''}`.toLowerCase().includes(query.toLowerCase()),
-  );
-  const pagination = usePagination(filtered, 18);
+  const [bookError, setBookError] = useState<{ bookId: string; message: string } | null>(null);
+  const pagination = useCollection('books', { search: query.trim() }, 18);
+  const editionPage = useCollection('editions', { book_id: selected }, 20, !!selected);
+  const branchPage = useCollection('branches', { book_id: selected }, 20, !!selected);
   const book = state.books.find((item) => item.id === selected);
-  const editions = state.editions.filter((item) => item.book_id === selected);
-  const branches = state.branches.filter((item) => item.book_id === selected);
+  const missingBook = selected && !book ? selected : '';
+  useEffect(() => {
+    if (!missingBook) return;
+    const controller = new AbortController();
+    setBookError(null);
+    void api<Book>(`/api/books/${encodeURIComponent(missingBook)}`, { signal: controller.signal })
+      .then((value) => {
+        if (!controller.signal.aborted) remember('books', [value]);
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted)
+          setBookError({
+            bookId: missingBook,
+            message: error instanceof Error ? error.message : '无法读取图书。',
+          });
+      });
+    return () => controller.abort();
+  }, [missingBook, remember]);
   const createBook = async (event: React.FormEvent) => {
     event.preventDefault();
     const result = await run('图书已建立，可以开始归属来源。', () =>
       post('/api/books', { title: title.trim(), author: author.trim(), language: 'zh' }),
     );
     if (result) {
+      if (result.book) remember('books', [result.book]);
       setSelected(result.book?.id || result.book_id || result.id);
       setCreating(false);
       setTitle('');
@@ -92,7 +109,7 @@ export default function Books({
           </button>
         </form>
       )}
-      <CollectionCoverage collection="books" />
+      {pagination.error && <p role="alert">{pagination.error}</p>}
       <div className="book-layout">
         <section>
           <div className="list-toolbar">
@@ -104,14 +121,17 @@ export default function Books({
               }}
               placeholder="搜索书名或作者"
             />
-            <span className="muted">{filtered.length} 本图书</span>
+            <span className="muted">{pagination.total} 本图书</span>
           </div>
           <div className="book-grid">
-            {pagination.visible.map((item, index) => (
+            {pagination.items.map((item, index) => (
               <button
                 key={item.id}
                 className={`book-card ${selected === item.id ? 'selected' : ''}`}
-                onClick={() => setSelected(item.id)}
+                onClick={() => {
+                  remember('books', [item]);
+                  setSelected(item.id);
+                }}
               >
                 <div className={`book-cover cover-${index % 4}`}>
                   <span>阅藏</span>
@@ -122,24 +142,21 @@ export default function Books({
                   <h3>{item.title}</h3>
                   <p>{item.author || '作者待确认'}</p>
                   <div>
-                    <span>
-                      {state.editions.filter((edition) => edition.book_id === item.id).length}{' '}
-                      个版本
-                    </span>
+                    <span>查看版本与整理稿</span>
                     <Badge status={item.default_revision_id ? 'finalized' : 'draft'} />
                   </div>
                 </div>
               </button>
             ))}
           </div>
-          {!filtered.length && (
+          {!pagination.loading && !pagination.error && !pagination.items.length && (
             <Empty title={query ? '没有找到图书' : '建立第一本图书'}>
               <p>将属于同一本书的片段归在一起，再选择底本生成整理稿。</p>
             </Empty>
           )}
           <Pager
             page={pagination.page}
-            total={filtered.length}
+            total={pagination.total}
             size={pagination.size}
             onChange={pagination.setPage}
           />
@@ -156,21 +173,27 @@ export default function Books({
               <div className="detail-section">
                 <div className="card-heading">
                   <h3>原有版本</h3>
-                  <span className="count">{editions.length}</span>
+                  <span className="count">{editionPage.total}</span>
                 </div>
-                {editions.length ? (
-                  editions.map((edition) => (
-                    <div className="edition-row" key={edition.id}>
-                      <strong>{edition.label || edition.name || '版本待确认'}</strong>
-                      <span>
-                        {edition.language || '语言待确认'}
-                        {edition.translator ? ` · ${edition.translator} 译` : ''}
-                      </span>
-                    </div>
-                  ))
-                ) : (
-                  <p className="muted">暂未区分版本。</p>
-                )}
+                {editionPage.items.length
+                  ? editionPage.items.map((edition) => (
+                      <div className="edition-row" key={edition.id}>
+                        <strong>{edition.label || edition.name || '版本待确认'}</strong>
+                        <span>
+                          {edition.language || '语言待确认'}
+                          {edition.translator ? ` · ${edition.translator} 译` : ''}
+                        </span>
+                      </div>
+                    ))
+                  : !editionPage.loading &&
+                    !editionPage.error && <p className="muted">暂未区分版本。</p>}
+                {editionPage.error && <p role="alert">{editionPage.error}</p>}
+                <Pager
+                  page={editionPage.page}
+                  total={editionPage.total}
+                  size={editionPage.size}
+                  onChange={editionPage.setPage}
+                />
                 <form
                   className="stack-form small-form"
                   onSubmit={async (event) => {
@@ -222,7 +245,7 @@ export default function Books({
               </div>
               <div className="detail-section">
                 <h3>整理分支</h3>
-                {branches.map((branch) => (
+                {branchPage.items.map((branch) => (
                   <button
                     className="branch-row"
                     key={branch.id}
@@ -233,7 +256,16 @@ export default function Books({
                     <Icon name="arrow" size={15} />
                   </button>
                 ))}
-                {!branches.length && <p className="muted">选择来源片段后创建整理稿。</p>}
+                {!branchPage.items.length && !branchPage.loading && !branchPage.error && (
+                  <p className="muted">选择来源片段后创建整理稿。</p>
+                )}
+                {branchPage.error && <p role="alert">{branchPage.error}</p>}
+                <Pager
+                  page={branchPage.page}
+                  total={branchPage.total}
+                  size={branchPage.size}
+                  onChange={branchPage.setPage}
+                />
               </div>
               <button
                 className="button full-width"
@@ -251,6 +283,10 @@ export default function Books({
                 <JsonDetails title="查看分析结果与待处理关系" value={analysis.result} />
               )}
             </>
+          ) : bookError?.bookId === selected ? (
+            <p role="alert">{bookError.message}</p>
+          ) : selected ? (
+            <p className="muted">正在读取图书…</p>
           ) : (
             <Empty title="选择一本图书">
               <p>查看版本、整理分支和来源关系。</p>

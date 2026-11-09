@@ -23,13 +23,17 @@ cd ..
 
 ## 检查
 
-安装开发依赖后执行 `python -m pytest`。测试全用临时目录和合成材料，涵盖内容哈希、来源区间、并发编辑、提案校验、任务租约、格式安全、导出、备份恢复和缓存保护。
+安装开发依赖后执行 `.\.venv\Scripts\python.exe -m pytest`。测试全用临时目录和合成材料，涵盖内容哈希、来源区间、并发编辑、提案校验、任务租约、格式安全、导出、备份恢复和缓存保护。
 
 `tests/ui/acceptance.py` 使用 Playwright 对已运行的本机服务执行交互流程；参数见脚本帮助。需要独立空书库与浏览器环境。实际浏览器验收和 HTTP 模拟模型测试应分别记录，模拟服务不能冒充真实模型。
 
 `tests/luna_scenario.py` 生成合成离线审阅请求并校验返回提案，用于有明确授权的真实模型验收。它不会调用云服务或读取现有书库。
 
 `tests/test_encoding_recovery.py`、`test_source_analysis.py`、`test_v020_integration.py` 覆盖编码恢复、混书提醒、同版对齐和请求持久化。`tests/test_legacy_doc.py` 包含真实 LibreOffice 转换用例及进程生命周期检查；缺少平台或转换器时会明确跳过，应单独报告未验证范围。`tests/ui/v020_acceptance.py` 可自启一次性服务，使用现有 Playwright 与 LibreOffice 验证新功能界面，执行参数见 `--help`。测试仅生成合成书籍，不下载真实图书。
+
+`tests/test_organization.py`、`tests/test_curation.py` 和 `tests/test_guided_api.py` 验证归属纠错、计划快照、事务检查、按底本顺序组稿以及备份恢复。`tests/ui/guided_acceptance.py` 使用现有 Playwright 与 Chromium 自启一次性服务，验证导入合成资料、批量归属、组稿和导出。用明确的 Python 解释器执行脚本，参数见 `--help`。浏览器验收会在指定的新目录建立独立书库。
+
+`tests/test_guided_quality.py` 检查独立合成样例中的归属匹配、待核范围、异文、来源可追溯性、历史目录访问和长文本预算。`tests/quality_scenarios.py` 可在新建的临时目录生成同类测试材料并写出 JSON 指标。评估记录应分别说明命中、错配、待核和预算截断，标注所用样本及实测规模。
 
 ## 打包
 
