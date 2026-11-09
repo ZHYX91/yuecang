@@ -81,23 +81,45 @@ class Workbench:
         if not row or row["state"] != "running" or row["token"] != job["token"] or (row["lease_until"] or 0) < time.time():
             raise DomainError("stale_job", "任务已暂停、取消或失去执行租约", 409)
 
-    def import_file(self, path, *, name=None, ocr=False, job=None):
+    def import_file(self, path, *, name=None, ocr=False, encoding="auto", repair="none", doc_converter="auto", derived_from=None, expected_blocks_sha=None, job=None):
+        from yuecang.core.encoding import validate_options, MAX_RECOVERY_BYTES
+        try:
+            validate_options(encoding, repair)
+        except ValueError as exc:
+            raise DomainError("text_options", str(exc)) from exc
+        if doc_converter not in {"auto", "libreoffice", "word", "wps"}:
+            raise DomainError("doc_converter", "未知 DOC 转换器")
         path = Path(path)
         if path.is_symlink() or not path.is_file():
             raise DomainError("input_path", "导入源必须为普通文件")
         name = Path(name or path.name).name
+        suffix = Path(name).suffix.lower()
+        if (encoding != "auto" or repair != "none") and suffix not in {".txt", ".md", ".markdown"}:
+            raise DomainError("encoding_format", "编码选择和文字修复仅适用于 TXT / Markdown")
+        if (repair != "none" or derived_from) and path.stat().st_size > MAX_RECOVERY_BYTES:
+            raise DomainError("text_recovery_limit", "文字恢复单次上限为 16 MiB")
+        if derived_from:
+            parent = self.source(derived_from)
+            if parent["blocks_sha"] != expected_blocks_sha or self.project.hash_file(path) != parent["asset_sha"] or name != parent["name"]:
+                raise DomainError("source_changed", "来源与预览不一致，请重新预览", 409)
         owner = f"{job['id']}:{job['token']}" if job else "import:" + uid()
         with path.open("rb") as stream:
             asset = self.project.put_stream(stream, "source", owner=owner)
-        parser_key = "formats-v1:" + Path(name).suffix.lower() + (":ocr" if ocr else "")
+        if derived_from and asset != parent["asset_sha"]:
+            raise DomainError("source_changed", "来源与预览不一致，请重新预览", 409)
+        parser_key = "formats-v2:" + suffix + ":" + digest([ocr, encoding, repair, doc_converter, derived_from])
         with self.project.connect() as db:
-            old = db.execute("SELECT id FROM sources WHERE asset_sha=? AND parser=?", (asset, parser_key)).fetchone()
-        if old:
+            old = db.execute("SELECT id,block_count FROM sources WHERE asset_sha=? AND (parser=? OR parser LIKE ?) ORDER BY (block_count>0) DESC,created DESC LIMIT 1", (asset, parser_key, parser_key + ":retry:%")).fetchone()
+        if old and old["block_count"]:
             with self.project.transaction() as db:
                 self._job_guard(db, job)
                 db.execute("INSERT INTO imports VALUES(?,?,?,?)", (uid(), old[0], name, time.time()))
                 self.project.event(db, "import.duplicate", old[0])
             return {"source_id": old[0], "duplicate": True}
+        if old:
+            # A previously unavailable converter or failed decoder is not a
+            # permanent cached success. Keep that failed extraction immutable.
+            parser_key += ":retry:" + uid()
         from yuecang.formats import extract
         from yuecang.formats.common import resource_budget
         from yuecang.storage.maintenance import register_temporary, forget_temporary
@@ -116,9 +138,14 @@ class Workbench:
                 with self.project.connect() as db:
                     self._job_guard(db, job)
                 self.project.reserve(reservation, size, owner)
+            def cancel_check():
+                with self.project.connect() as db:
+                    self._job_guard(db, job)
+                return False
             with resource_budget(scratch / "resources", reserve=reserve_extraction,
                                  initial_bytes=local_input.stat().st_size):
-                result = extract(local_input, ocr=ocr, resource_dir=scratch / "resources")
+                result = extract(local_input, ocr=ocr, resource_dir=scratch / "resources", encoding=encoding, repair=repair,
+                                 doc_converter=doc_converter, cancel_check=cancel_check if job else None)
             blocks = copy.deepcopy(result.blocks)
             resources = []
             for block in blocks:
@@ -140,6 +167,9 @@ class Workbench:
             metadata = dict(result.metadata)
             metadata["title"] = result.title or Path(name).stem
             metadata["extractor"] = result.parser
+            if derived_from:
+                metadata["derived_from"] = derived_from
+                metadata["recovery_options"] = {"encoding": encoding, "repair": repair, "parent_blocks_sha": expected_blocks_sha}
             metadata["suggested_segments"] = self._suggest_segments(blocks, result.title or Path(name).stem)
             with self.project.transaction() as db:
                 self._job_guard(db, job)
@@ -164,6 +194,26 @@ class Workbench:
                     forget_temporary(self.project, registration)
             finally:
                 self.project.release_reservation(reservation, owner)
+
+    def text_preview(self, source_id, *, encoding="auto", repair="none"):
+        from yuecang.core.encoding import preview, MAX_RECOVERY_BYTES
+        source = self.source(source_id)
+        if Path(source["name"]).suffix.lower() not in {".txt", ".md", ".markdown"}:
+            raise DomainError("encoding_format", "编码恢复仅适用于 TXT / Markdown")
+        path = self.project.object_path(source["asset_sha"])
+        if path.stat().st_size > MAX_RECOVERY_BYTES:
+            raise DomainError("text_recovery_limit", "文字恢复单次上限为 16 MiB")
+        raw = path.read_bytes()
+        if digest(raw) != source["asset_sha"]:
+            raise DomainError("corrupt_object", "原件校验失败")
+        try:
+            result = preview(raw, encoding, repair)
+        except ValueError as exc:
+            raise DomainError("text_decode", str(exc)) from exc
+        current_text = "".join(b["text"] for b in source["blocks"])
+        result["original_preview"] = current_text[:8000]
+        result["changed"] = result["text_sha256"] != hashlib.sha256(current_text.encode()).hexdigest()
+        return {**result, "source_id": source_id, "expected_blocks_sha": source["blocks_sha"]}
 
     @staticmethod
     def _tokens(blocks):

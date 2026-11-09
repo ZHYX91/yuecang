@@ -87,7 +87,7 @@ def main():
             image_name = f"synthetic-page-{marker}.png"
             image_name = upload(image_name, png, "image/png")["name"]
             page.reload(wait_until="domcontentloaded")
-            expect(page.locator(".version-label")).to_have_text("LOCAL WORKBENCH · 0.1.0")
+            expect(page.locator(".version-label")).to_have_text("LOCAL WORKBENCH · 0.2.0")
             page.locator(".source-list-row").filter(has_text=image_name).click()
             page.get_by_role("button", name="核对原图", exact=True).click()
             image = page.locator(".source-resource img")

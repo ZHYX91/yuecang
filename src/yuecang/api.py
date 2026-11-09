@@ -17,7 +17,7 @@ from anyio import to_thread
 from starlette.formparsers import MultiPartParser, MultiPartException
 from yuecang.ai import ReviewService
 from yuecang.application.service import Workbench
-from yuecang.storage.project import DomainError, uid, linked, digest
+from yuecang.storage.project import DomainError, uid, linked, digest, canonical
 
 
 def fields(payload, allowed, required=()):
@@ -87,6 +87,16 @@ def create_app(project_root, *, start_worker=True):
     @app.get("/api/state")
     def state():
         return wb.state()
+
+    @app.get("/api/import-options")
+    def import_options():
+        from yuecang.core.encoding import ENCODINGS
+        from yuecang.formats.legacy_doc import detect_converters
+        detected = detect_converters()
+        labels = {"libreoffice": "LibreOffice", "word": "Microsoft Word", "wps": "WPS 文字"}
+        return {"encodings": [{"id": k, "label": v} for k, v in ENCODINGS.items()],
+                "converters": [{"id": "auto", "label": "自动（仅 LibreOffice）", "available": True},
+                               *[{**item, "label": labels[item["id"]]} for item in detected]]}
 
     @app.get("/api/events")
     async def events(request: Request):
@@ -174,6 +184,15 @@ def create_app(project_root, *, start_worker=True):
                 raise DomainError("multipart", "文件上传未完整结束", 400)
             jobs = []
             ocr = str(form.get("ocr", "false")).lower() == "true"
+            encoding = str(form.get("encoding", "auto"))
+            doc_converter = str(form.get("doc_converter", "auto"))
+            from yuecang.core.encoding import validate_options
+            try:
+                validate_options(encoding)
+            except ValueError as exc:
+                raise DomainError("text_options", str(exc)) from exc
+            if doc_converter not in {"auto", "libreoffice", "word", "wps"}:
+                raise DomainError("doc_converter", "未知 DOC 转换器")
             for _, value in form.multi_items():
                 if hasattr(value, "file"):
                     name = Path(value.filename or "source.txt").name
@@ -181,7 +200,17 @@ def create_app(project_root, *, start_worker=True):
                     # the reservation cannot be released under an active writer.
                     sha = await to_thread.run_sync(partial(project.put_stream, value.file, "upload", owner=owner,
                                                           max_bytes=min(length, MAX_INPUT_BYTES), reservation=reservation))
-                    job = JobQueue(project).enqueue("import", {"asset_sha": sha, "name": name, "ocr": ocr}, input_key=digest(["import", sha, ocr, name]))
+                    selected_encoding = encoding if Path(name).suffix.lower() in {".txt", ".md", ".markdown"} else "auto"
+                    payload = {"asset_sha": sha, "name": name, "ocr": ocr, "encoding": selected_encoding, "doc_converter": doc_converter}
+                    job = JobQueue(project).enqueue("import", payload, input_key=digest(["import-v2", payload]))
+                    with project.connect() as db:
+                        latest = db.execute("SELECT id FROM jobs WHERE kind='import' AND payload=? ORDER BY created DESC,rowid DESC LIMIT 1", (canonical(payload),)).fetchone()
+                    if latest:
+                        job = JobQueue(project).get(latest[0])
+                    if job["state"] == "succeeded" and job.get("result", {}).get("source_id"):
+                        prior = project.row("sources", job["result"]["source_id"])
+                        if not prior["block_count"]:
+                            job = JobQueue(project).enqueue("import", payload, input_key=digest(["import-retry", payload, prior["id"]]))
                     jobs.append(job)
             if not jobs:
                 raise DomainError("files", "请选择要导入的文件")
@@ -194,6 +223,62 @@ def create_app(project_root, *, start_worker=True):
     @app.get("/api/sources/{source_id}")
     def source(source_id: str):
         return wb.source(source_id)
+
+    @app.post("/api/sources/{source_id}/text-preview")
+    def text_preview(source_id: str, payload: dict):
+        return wb.text_preview(source_id, **fields(payload, {"encoding", "repair"}))
+
+    @app.post("/api/sources/{source_id}/text-apply")
+    def text_apply(source_id: str, payload: dict):
+        from yuecang.jobs import JobQueue
+        fields(payload, {"encoding", "repair", "expected_blocks_sha"}, {"encoding", "repair", "expected_blocks_sha"})
+        preview = wb.text_preview(source_id, encoding=payload["encoding"], repair=payload["repair"])
+        if payload["expected_blocks_sha"] != preview["expected_blocks_sha"]:
+            raise DomainError("source_changed", "来源与预览不一致，请重新预览", 409)
+        source = wb.source(source_id)
+        parameters = {"asset_sha": source["asset_sha"], "name": source["name"], "encoding": preview["encoding"],
+                      "repair": payload["repair"], "derived_from": source_id, "expected_blocks_sha": preview["expected_blocks_sha"]}
+        return {"job": JobQueue(project).enqueue("import", parameters, input_key=digest(["text-recovery", parameters]))}
+
+    @app.post("/api/sources/{source_id}/inspect")
+    def source_inspect(source_id: str):
+        from yuecang.application.source_analysis import SourceAnalysis
+        return SourceAnalysis(wb).inspect(source_id)
+
+    @app.post("/api/sources/{source_id}/boundaries/{boundary_id}/decision")
+    def boundary_decision(source_id: str, boundary_id: str, payload: dict):
+        from yuecang.application.source_analysis import SourceAnalysis
+        return SourceAnalysis(wb).set_review_state(source_id, boundary_id, **fields(payload, {"state"}, {"state"}))
+
+    @app.post("/api/sources/{source_id}/boundary-reviews")
+    def boundary_review(source_id: str, payload: dict):
+        from yuecang.application.source_analysis import SourceAnalysis
+        return SourceAnalysis(wb).create_review(source_id, **fields(payload, {"boundary_ids"}))
+
+    @app.get("/api/sources/{source_id}/boundary-reviews")
+    def boundary_review_list(source_id: str):
+        from yuecang.application.source_analysis import SourceAnalysis
+        project.row("sources", source_id)
+        with project.connect() as db:
+            rows = db.execute("SELECT id FROM candidates WHERE source_id=? AND kind='source_review' ORDER BY created DESC LIMIT 100", (source_id,)).fetchall()
+        return {"items": [SourceAnalysis(wb).get_review(row[0]) for row in rows]}
+
+    @app.get("/api/boundary-reviews/{request_id}")
+    def get_boundary_review(request_id: str):
+        from yuecang.application.source_analysis import SourceAnalysis
+        return SourceAnalysis(wb).get_review(request_id)
+
+    @app.post("/api/boundary-reviews/{request_id}/receive")
+    def receive_boundary_review(request_id: str, payload: dict):
+        from yuecang.application.source_analysis import SourceAnalysis
+        # Frozen requests/strict response schemas are validated by the service.
+        return SourceAnalysis(wb).receive_review(request_id, payload)
+
+    @app.post("/api/alignment")
+    def source_alignment(payload: dict):
+        from yuecang.application.source_analysis import SourceAnalysis
+        return SourceAnalysis(wb).align(**fields(payload, {"book_id", "edition_id", "left_source_id", "right_source_id"},
+                                                {"book_id", "edition_id", "left_source_id", "right_source_id"}))
 
     @app.get("/api/sources/{source_id}/resources/{sha}")
     def source_resource(source_id: str, sha: str):

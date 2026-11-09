@@ -1,31 +1,18 @@
 from __future__ import annotations
 
-import codecs
 import re
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from .common import ExtractionError, ExtractionResult, MAX_MEMBER_BYTES, resource_bytes
+from yuecang.core.encoding import decode, repair_text, text_issues
 
 
 def decode_text(raw: bytes) -> tuple[str, str, bool]:
-    for bom, encoding in ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),
-                          (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"),
-                          (codecs.BOM_UTF8, "utf-8-sig")):
-        if raw.startswith(bom):
-            return raw.decode(encoding), encoding, False
     try:
-        return raw.decode("utf-8"), "utf-8", False
-    except UnicodeDecodeError:
-        candidates = []
-        for encoding in ("gb18030", "big5"):
-            try:
-                candidates.append((raw.decode(encoding), encoding))
-            except UnicodeDecodeError:
-                pass
-        if not candidates:
-            raise ExtractionError("text_encoding_unrecognized")
-        return candidates[0][0], candidates[0][1], len({x[0] for x in candidates}) > 1
+        return decode(raw)
+    except ValueError as exc:
+        raise ExtractionError(str(exc)) from exc
 
 
 def _local_images(path: Path, tokens, directory: Path | None, result: ExtractionResult) -> list[dict]:
@@ -53,27 +40,56 @@ def _local_images(path: Path, tokens, directory: Path | None, result: Extraction
     return images
 
 
-def extract_plain(path: Path, *, markdown: bool, resource_dir: Path | None) -> ExtractionResult:
-    text, encoding, ambiguous = decode_text(path.read_bytes())
+def extract_plain(path: Path, *, markdown: bool, resource_dir: Path | None, encoding="auto", repair="none") -> ExtractionResult:
+    try:
+        text, encoding, ambiguous = decode(path.read_bytes(), encoding)
+        text, changes = repair_text(text, repair)
+    except ValueError as exc:
+        raise ExtractionError(str(exc)) from exc
     result = ExtractionResult(path.stem, metadata={"encoding": encoding, "source_format": "markdown" if markdown else "txt"},
                               parser="markdown-it-source-v1" if markdown else "plaintext-v1")
+    result.metadata["text_recovery"] = {"repair": repair, "changes": changes, "explicit": repair != "none"}
+    result.issues.extend(text_issues(text))
+    if repair != "none":
+        result.issue("derived_text", "此提取是用户确认的文字修复，位置按修复后的码点计算；原始文件保持不变")
     if ambiguous:
         result.issue("encoding_ambiguous", "多个编码可以解码；请核对预览并选择正确编码")
     if not text:
         result.issue("empty_document", "文件没有文本", severity="error")
         return result
-    lines = text.splitlines(keepends=True)
+    # markdown-it normalizes CRLF/CR to LF, but does not split on Python's
+    # additional Unicode line separators. Keep its line maps in the original
+    # codepoint space, including the original CRLF widths.
+    lines = re.findall(r"[^\r\n]*(?:\r\n|\r|\n|$)", text) if markdown else text.splitlines(keepends=True)
+    if lines and not lines[-1]:
+        lines.pop()
     offsets = [0]
     for line in lines:
         offsets.append(offsets[-1] + len(line))
     if not markdown:
+        from yuecang.core.parsing import chapter_heading_ordinal
+        def emit(start, end, kind="paragraph"):
+            # Bound matching units even when an entire book has no blank lines.
+            while start < end:
+                stop = min(end, start + 4096)
+                result.add(kind, text[start:stop], {"start": start, "end": stop, "offset_space": "decoded_codepoints"})
+                start = stop
+
         start = 0
         for index, line in enumerate(lines):
+            stripped = line.strip()
+            heading = bool(stripped and len(stripped) <= 120 and (
+                re.fullmatch(r"《[^》\r\n]+》", stripped) or
+                chapter_heading_ordinal(stripped) is not None or
+                re.match(r"^(?:chapter|part|book)\s+(?:\d+|[IVXLCDM]+)\b", stripped, re.I)))
+            if heading:
+                emit(start, offsets[index])
+                emit(offsets[index], offsets[index + 1], "heading")
+                start = offsets[index + 1]
+                continue
             if not line.strip() or index == len(lines) - 1:
                 end = offsets[index + 1]
-                chunk = text[start:end]
-                if chunk:
-                    result.add("paragraph", chunk, {"start": start, "end": end, "offset_space": "decoded_codepoints"})
+                emit(start, end)
                 start = end
         return result
     from markdown_it import MarkdownIt

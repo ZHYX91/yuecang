@@ -56,13 +56,14 @@ def _process_stamp(pid):
     return {"host": host, "pid": pid, "birth": boot + ":" + fields[19], "running": fields[0] not in {"Z", "X"}}
 
 
-def _group_has_running_process(group_id):
+def _task_has_running_process(task_pid, *, include_other_groups=False):
+    id_index = 3 if include_other_groups else 2  # /proc stat session or process group
     for entry in Path("/proc").iterdir():
         if not entry.name.isdecimal():
             continue
         try:
             fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-            if int(fields[2]) == group_id and fields[0] not in {"Z", "X"}:
+            if int(fields[id_index]) == task_pid and fields[0] not in {"Z", "X"}:
                 return True
         except FileNotFoundError:
             continue
@@ -77,8 +78,8 @@ def _attempt_stopped(stamp):
         if current and current["birth"] == stamp.get("birth") and current["running"]:
             return False
         # Windows's task Job Object closes with its owning task process. Linux
-        # needs an explicit check that no external member of its group is active.
-        return os.name == "nt" or not _group_has_running_process(stamp["pid"])
+        # also tracks the DOC supervisor's separate group within this session.
+        return os.name == "nt" or not _task_has_running_process(stamp["pid"], include_other_groups=True)
     except (OSError, ValueError, IndexError):
         return False
 
@@ -396,7 +397,10 @@ def dispatch(project: Project, job):
     wb = Workbench(project)
     payload = job["payload"]
     if job["kind"] == "import":
-        return wb.import_file(project.object_path(payload["asset_sha"]), name=payload["name"], ocr=bool(payload.get("ocr", False)), job=job)
+        return wb.import_file(project.object_path(payload["asset_sha"]), name=payload["name"], ocr=bool(payload.get("ocr", False)),
+                              encoding=payload.get("encoding", "auto"), repair=payload.get("repair", "none"),
+                              doc_converter=payload.get("doc_converter", "auto"), derived_from=payload.get("derived_from"),
+                              expected_blocks_sha=payload.get("expected_blocks_sha"), job=job)
     if job["kind"] == "analyze":
         return wb.analyze(source_id=payload.get("source_id"), book_id=payload.get("book_id"), job=job)
     if job["kind"] == "export":
@@ -576,10 +580,15 @@ def run_isolated_one(queue: JobQueue, *, max_seconds=3600, stop_event=None, call
             process.join(timeout=2)
         if os.name != "nt" and stamp:
             try:
-                if _group_has_running_process(process.pid):
+                if _task_has_running_process(process.pid):
                     os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            # The DOC supervisor watches the task pipe and can outlive the
+            # task's group briefly while it drains detached converter children.
+            deadline = time.monotonic() + 2
+            while _task_has_running_process(process.pid, include_other_groups=True) and time.monotonic() < deadline:
+                time.sleep(0.05)
         if not process.is_alive() and stamp:
             queue.release_attempt_reservations(job, stamp)
         receiver.close()

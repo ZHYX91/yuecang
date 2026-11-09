@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, post } from './api';
 import {
   Badge,
@@ -6,6 +6,7 @@ import {
   Empty,
   Icon,
   JsonDetails,
+  Issues,
   Pager,
   Search,
   SectionHeading,
@@ -14,7 +15,14 @@ import {
 } from './components';
 import { SourcePanel } from './SourcePanel';
 import { useWorkbench } from './store';
-import { nameOf, type RecordData, type SelectedSpan } from './types';
+import {
+  derivationOf,
+  encodingOptions,
+  fileNameOf,
+  nameOf,
+  type RecordData,
+  type SelectedSpan,
+} from './types';
 
 export default function Sources({
   selected,
@@ -35,13 +43,29 @@ export default function Sources({
   const [query, setQuery] = useState('');
   const [dragging, setDragging] = useState(false);
   const [analysis, setAnalysis] = useState<{ sourceId: string; result: RecordData } | null>(null);
+  const [encoding, setEncoding] = useState('auto');
+  const [converter, setConverter] = useState('auto');
+  const [importOptions, setImportOptions] = useState<RecordData | null>(null);
+  const [optionsError, setOptionsError] = useState('');
   const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    void api('/api/import-options', { signal: controller.signal })
+      .then(setImportOptions)
+      .catch((error) => {
+        if (error.name !== 'AbortError') setOptionsError(error.message);
+      });
+    return () => controller.abort();
+  }, []);
   const filtered = state.sources.filter((source) =>
     nameOf(source).toLowerCase().includes(query.toLowerCase()),
   );
   const pagination = usePagination(filtered, 15);
   const candidates = (state.candidates || []).filter(
-    (item: RecordData) => item.source_id === selected,
+    (item: RecordData) =>
+      item.source_id === selected &&
+      item.other_source_id &&
+      ['exact_text', 'related_content'].includes(item.kind),
   );
   const analyzeSelected = async () => {
     const result = await run('', () => post(`/api/sources/${selected}/analyze`));
@@ -59,6 +83,8 @@ export default function Sources({
     if (!files?.length) return;
     const form = new FormData();
     Array.from(files).forEach((file) => form.append('files', file));
+    form.append('encoding', encoding);
+    form.append('doc_converter', converter);
     await run(`${files.length} 个文件已提交，提取状态会自动更新。`, () =>
       api('/api/imports', { method: 'POST', body: form }),
     );
@@ -112,10 +138,65 @@ export default function Sources({
               选择文件
             </button>
           </strong>
-          <p>TXT、Markdown、EPUB、DOCX、PDF · 每个文件都会保留明确的处理结果</p>
+          <p>TXT、Markdown、EPUB、DOC、DOCX、PDF、图片 · 原件与处理结果分别保存</p>
         </div>
         <span className="local-chip">原件保留在本地</span>
       </div>
+      <details className="import-options">
+        <summary>导入选项 · 文本编码与旧版 DOC 转换</summary>
+        <div className="option-grid">
+          <label>
+            TXT / Markdown 编码
+            <select
+              aria-label="导入文本编码"
+              value={encoding}
+              onChange={(event) => setEncoding(event.target.value)}
+              disabled={busy > 0}
+            >
+              {(importOptions?.encodings || encodingOptions).map((option: RecordData) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            DOC 转换器
+            <select
+              aria-label="DOC 转换器"
+              value={converter}
+              onChange={(event) => setConverter(event.target.value)}
+              disabled={busy > 0}
+            >
+              {(
+                importOptions?.converters || [
+                  { id: 'auto', label: '自动选择已安装的转换器', available: true },
+                ]
+              ).map((option: RecordData) => (
+                <option
+                  key={option.id}
+                  value={option.id}
+                  disabled={!option.available && option.id !== 'auto'}
+                >
+                  {option.label}
+                  {!option.available && option.id !== 'auto' ? '（不可用）' : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <p className="field-help">
+          这些选项仅应用于本批相应格式。DOC 需要本机已安装的转换器；不会自动下载。
+        </p>
+        {(importOptions?.converters || [])
+          .filter((option: RecordData) => !option.available && option.reason)
+          .map((option: RecordData) => (
+            <p className="field-help" key={option.id}>
+              {option.label}：{option.reason}
+            </p>
+          ))}
+        <Issues issues={optionsError ? [optionsError] : []} />
+      </details>
       <p className="format-note">
         Markdown 配图需要作为关联资源提供，缺失时会明确标记；扫描 PDF 的文字识别需要本机 OCR 工具。
       </p>
@@ -140,21 +221,23 @@ export default function Sources({
               {pagination.visible.map((source) => (
                 <button
                   key={source.id}
+                  data-source-id={source.id}
                   className={`source-list-row ${selected === source.id ? 'active' : ''}`}
                   onClick={() => setSelected(source.id)}
                 >
                   <span className="file-type">
-                    {(source.extension || nameOf(source).split('.').pop() || 'FILE')
+                    {(source.extension || fileNameOf(source).split('.').pop() || 'FILE')
                       .replace('.', '')
                       .slice(0, 4)
                       .toUpperCase()}
                   </span>
                   <span className="source-row-main">
-                    <strong>{nameOf(source)}</strong>
+                    <strong title={nameOf(source)}>{nameOf(source)}</strong>
                     <small>
-                      {source.byte_size !== undefined || source.size !== undefined
-                        ? bytes(source.byte_size ?? source.size)
-                        : '大小待统计'}{' '}
+                      {derivationOf(source) ||
+                        (source.byte_size !== undefined || source.size !== undefined
+                          ? bytes(source.byte_size ?? source.size)
+                          : '大小待统计')}{' '}
                       · {source.block_count ?? source.blocks_count ?? '—'} 个内容块
                     </small>
                   </span>
@@ -222,7 +305,13 @@ export default function Sources({
           {analysis?.sourceId === selected && (
             <JsonDetails title="查看本次候选分析结果" value={analysis.result} />
           )}
-          <SourcePanel sourceId={selected} selections={selections} add={add} remove={remove} />
+          <SourcePanel
+            key={selected}
+            sourceId={selected}
+            selections={selections}
+            add={add}
+            remove={remove}
+          />
         </section>
       </div>
     </>

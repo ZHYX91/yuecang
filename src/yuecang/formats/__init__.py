@@ -10,13 +10,13 @@ from .common import ExtractionError, ExtractionResult, MAX_INPUT_BYTES, resource
 __all__ = ["extract", "ExtractionResult", "ExtractionError"]
 
 
-def extract(path: Path, *, ocr: bool = False, resource_dir: Path | None = None) -> ExtractionResult:
+def extract(path: Path, *, ocr: bool = False, resource_dir: Path | None = None, encoding="auto", repair="none", doc_converter="auto", cancel_check=None) -> ExtractionResult:
     root = Path(resource_dir) if resource_dir is not None else Path(tempfile.mkdtemp(prefix="yuecang-resources-"))
     with resource_budget(root):
-        return _extract(path, ocr=ocr, resource_dir=root)
+        return _extract(path, ocr=ocr, resource_dir=root, encoding=encoding, repair=repair, doc_converter=doc_converter, cancel_check=cancel_check)
 
 
-def _extract(path: Path, *, ocr: bool, resource_dir: Path) -> ExtractionResult:
+def _extract(path: Path, *, ocr: bool, resource_dir: Path, encoding="auto", repair="none", doc_converter="auto", cancel_check=None) -> ExtractionResult:
     path = Path(path)
     if not path.is_file():
         raise ExtractionError("source_not_a_file")
@@ -27,7 +27,10 @@ def _extract(path: Path, *, ocr: bool, resource_dir: Path) -> ExtractionResult:
     try:
         if suffix in {".txt", ".md", ".markdown"}:
             from .plaintext import extract_plain
-            result = extract_plain(path, markdown=suffix != ".txt", resource_dir=root)
+            result = extract_plain(path, markdown=suffix != ".txt", resource_dir=root, encoding=encoding, repair=repair)
+        elif suffix == ".doc":
+            from .legacy_doc import extract_doc
+            result = extract_doc(path, root, converter=doc_converter, cancel_check=cancel_check)
         elif suffix == ".epub":
             from .epub import extract_epub
             result = extract_epub(path, root)

@@ -29,6 +29,8 @@ cd ..
 
 `tests/luna_scenario.py` 生成合成离线审阅请求并校验返回提案，用于有明确授权的真实模型验收。它不会调用云服务或读取现有书库。
 
+`tests/test_encoding_recovery.py`、`test_source_analysis.py`、`test_v020_integration.py` 覆盖编码恢复、混书提醒、同版对齐和请求持久化。`tests/test_legacy_doc.py` 包含真实 LibreOffice 转换用例及进程生命周期检查；缺少平台或转换器时会明确跳过，应单独报告未验证范围。`tests/ui/v020_acceptance.py` 可自启一次性服务，使用现有 Playwright 与 LibreOffice 验证新功能界面，执行参数见 `--help`。测试仅生成合成书籍，不下载真实图书。
+
 ## 打包
 
 `tools/build_portable.py` 使用显式指定的已有 Windows CPython 运行时，按锁文件构建自包含目录。输出必须为新的目录；不复用维护者私有环境，不自动下载 Python，不从源码目录外寻找用户资料。打包前先构建前端，详见脚本 `--help`。

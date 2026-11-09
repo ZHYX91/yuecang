@@ -170,7 +170,7 @@ def test_extraction_registers_scratch_and_stops_cumulative_resources_before_writ
     sha, queue, job = import_job(project)
     project.save_settings({"storage": {"temporary_bytes": 1000}})
 
-    def extract(path, *, ocr, resource_dir):
+    def extract(path, *, ocr, resource_dir, **options):
         assert counts(project) == (1, 1)
         resource_bytes(b"a" * 600, "first.bin", resource_dir)
         assert project.storage_status()["reserved_bytes"] == path.stat().st_size + 600
@@ -188,7 +188,7 @@ def test_cancelled_extraction_keeps_registration_when_cleanup_fails(tmp_path):
     project = wb.project
     sha, queue, job = import_job(project)
 
-    def extract(path, *, ocr, resource_dir):
+    def extract(path, *, ocr, resource_dir, **options):
         queue.cancel(job["id"])
         resource_bytes(b"should never be written", "cancelled.bin", resource_dir)
 
@@ -212,7 +212,7 @@ def test_import_writes_all_use_attempt_owner_and_forget_completed_temps(tmp_path
         owners.append(owner)
         return reserve(identifier, size, owner)
 
-    def extract(path, *, ocr, resource_dir):
+    def extract(path, *, ocr, resource_dir, **options):
         resource = resource_bytes(b"synthetic resource", "image.bin", resource_dir)
         result = ExtractionResult("Synthetic")
         result.add("paragraph", "synthetic text", {}, resources=[resource])

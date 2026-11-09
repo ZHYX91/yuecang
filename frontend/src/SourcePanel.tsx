@@ -2,8 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { api, post } from './api';
 import { useWorkbench } from './store';
 import { Badge, Empty, Issues, Pager, Search, usePagination } from './components';
+import SourceRecovery from './SourceRecovery';
+import SourceInspection from './SourceInspection';
 import {
   codePointOffset,
+  characterLength,
+  fileNameOf,
   nameOf,
   spanKey,
   textOf,
@@ -46,21 +50,17 @@ export function SourcePanel({
   const [source, setSource] = useState<Source | null>(null);
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(Boolean(sourceId));
   const [query, setQuery] = useState('');
   const [range, setRange] = useState<{ block: Block; start: number; end: number } | null>(null);
   const textareas = useRef<Record<string, HTMLTextAreaElement | null>>({});
   useEffect(() => {
-    setSource(null);
-    setBlocks([]);
     setError('');
-    setRange(null);
-    setQuery('');
     if (!sourceId) return;
     const controller = new AbortController();
-    setLoading(true);
     void api<any>(`/api/sources/${encodeURIComponent(sourceId)}`, { signal: controller.signal })
       .then((data) => {
+        if (controller.signal.aborted) return;
         setSource(data.source || data);
         setBlocks(data.blocks || data.source?.blocks || data.extraction?.blocks || []);
       })
@@ -76,16 +76,18 @@ export function SourcePanel({
     (block) => !query || textOf(block).toLowerCase().includes(query.toLowerCase()),
   );
   const pagination = usePagination(filtered, compact ? 10 : 15);
-  const toSpan = (block: Block, start?: number, end?: number): SelectedSpan => ({
-    source_id: sourceId,
-    block_id: block.id,
-    start,
-    end,
-    text:
-      start === undefined ? textOf(block) : Array.from(textOf(block)).slice(start, end).join(''),
-    source_name: source ? nameOf(source) : sourceId,
-    type: block.type,
-  });
+  const toSpan = (block: Block, start = 0, end?: number): SelectedSpan => {
+    const text = textOf(block);
+    return {
+      source_id: sourceId,
+      block_id: block.id,
+      start,
+      end: end ?? characterLength(text),
+      text: end === undefined ? text : Array.from(text).slice(start, end).join(''),
+      source_name: source ? nameOf(source) : sourceId,
+      type: block.type,
+    };
+  };
   if (!sourceId)
     return (
       <Empty title="选择一份来源" icon="sources">
@@ -99,9 +101,10 @@ export function SourcePanel({
         正在读取来源…
       </div>
     );
-  if (error) return <Issues issues={[error]} />;
+  if (error && !source) return <Issues issues={[error]} />;
   return (
     <div className={`source-panel ${compact ? 'compact' : ''}`}>
+      <Issues issues={error ? [error] : []} />
       {source && (
         <div className="source-panel-meta">
           <div>
@@ -121,6 +124,15 @@ export function SourcePanel({
         </div>
       )}
       <Issues issues={source?.issues} />
+      {!compact &&
+        source &&
+        (['txt', 'markdown'].includes(source.metadata?.source_format) ||
+          /\.(txt|md|markdown)$/i.test(fileNameOf(source))) && (
+          <SourceRecovery key={sourceId} sourceId={sourceId} />
+        )}
+      {!compact && source && (
+        <SourceInspection key={sourceId} source={source} blocks={blocks} add={add} />
+      )}
       {add && source && source.metadata?.suggested_segments?.length > 0 && (
         <details className="segment-suggestions">
           <summary>识别到 {source.metadata.suggested_segments.length} 个范围候选</summary>
@@ -315,7 +327,7 @@ export function SourcePanel({
   );
 }
 
-function SourceResource({ sourceId, resource }: { sourceId: string; resource: any }) {
+export function SourceResource({ sourceId, resource }: { sourceId: string; resource: any }) {
   const [open, setOpen] = useState(false);
   const url = `/api/sources/${encodeURIComponent(sourceId)}/resources/${encodeURIComponent(resource.sha256)}`;
   const raster = resource.mime

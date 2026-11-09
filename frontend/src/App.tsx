@@ -119,7 +119,7 @@ export default function App() {
             </div>
           </div>
           <p>保留来源，细致整理。</p>
-          <span className="version-label">LOCAL WORKBENCH · 0.1.0</span>
+          <span className="version-label">LOCAL WORKBENCH · 0.2.0</span>
         </div>
       </aside>
       <div className="main-shell">

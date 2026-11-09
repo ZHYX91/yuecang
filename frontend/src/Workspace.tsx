@@ -4,8 +4,16 @@ import { Empty, Icon, SectionHeading, shortId } from './components';
 import { SourcePanel } from './SourcePanel';
 import RevisionEditor from './RevisionEditor';
 import Comparison from './Comparison';
+import SourceAlignment from './SourceAlignment';
 import { useWorkbench } from './store';
-import { assemblyPayload, nameOf, payloadSpan, spanKey, type SelectedSpan } from './types';
+import {
+  assemblyPayload,
+  nameOf,
+  payloadSpan,
+  spanKey,
+  type RecordData,
+  type SelectedSpan,
+} from './types';
 
 export default function Workspace({
   bookId,
@@ -42,6 +50,12 @@ export default function Workspace({
   const [tab, setTab] = useState<'compare' | 'edit'>(revisionId ? 'edit' : 'compare');
   const editions = state.editions.filter((item) => item.book_id === bookId);
   const revisions = state.revisions.filter((item) => item.book_id === bookId);
+  const latestAlignmentAssignment = (state.assignments || []).find(
+    (item: RecordData) =>
+      item.book_id === bookId &&
+      item.edition_id === editionId &&
+      (item.source_id === leftId || item.source_id === rightId),
+  );
   useEffect(() => {
     if (!leftId && state.sources.length) setLeftId(sourceId || state.sources[0].id);
   }, [leftId, state.sources, sourceId]);
@@ -139,6 +153,7 @@ export default function Workspace({
         <section className="card comparison-column">
           {sourceSelect(leftId, setLeftId, '左侧来源')}
           <SourcePanel
+            key={leftId}
             sourceId={leftId}
             compact
             selections={selections}
@@ -149,6 +164,7 @@ export default function Workspace({
         <section className="card comparison-column">
           {sourceSelect(rightId, setRightId, '右侧来源')}
           <SourcePanel
+            key={rightId}
             sourceId={rightId}
             compact
             selections={selections}
@@ -251,6 +267,14 @@ export default function Workspace({
         </aside>
       </div>
       <div hidden={tab !== 'compare'}>
+        <SourceAlignment
+          key={JSON.stringify([bookId, editionId, leftId, rightId, latestAlignmentAssignment?.id])}
+          bookId={bookId}
+          editionId={editionId}
+          leftId={leftId}
+          rightId={rightId}
+          add={add}
+        />
         <Comparison leftId={leftId} rightId={rightId} />
       </div>
       <section hidden={tab !== 'edit'} className="card editor-card">

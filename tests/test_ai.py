@@ -128,7 +128,9 @@ def test_mixed_book_only_assigned_ranges_sent(library):
 
 def synthetic_long_book(tmp_path, paragraphs):
     wb = Workbench(tmp_path / "long-project")
-    path = tmp_path / "synthetic-long.txt"
+    # Markdown deliberately preserves a very long block: the AI slice/rebase
+    # contract must also work for formats that do not chunk long TXT paragraphs.
+    path = tmp_path / "synthetic-long.md"
     path.write_text("\n\n".join(paragraphs), encoding="utf-8")
     source = wb.source(wb.import_file(path)["source_id"])
     book = wb.create_book("合成长书", author="测试作者")

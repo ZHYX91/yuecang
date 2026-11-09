@@ -21,6 +21,10 @@ def test_local_origin_csrf_and_json_text(tmp_path):
 def test_upload_queue_and_error(tmp_path):
     client = TestClient(create_app(tmp_path / "p", start_worker=False))
     headers = {"X-Yuecang-CSRF": client.get("/api/session").json()["csrf_token"]}
+    options = client.get('/api/import-options').json()
+    assert options['converters'][0]['id'] == 'auto'
+    assert all(item['label'] for item in options['converters'])
+    assert any(item['id'] == 'big5' for item in options['encodings'])
     result = client.post("/api/imports", headers=headers, files=[("files", ("合成.txt", b"synthetic content", "text/plain"))])
     assert result.status_code == 200
     job = result.json()["jobs"][0]
