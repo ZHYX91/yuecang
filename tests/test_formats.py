@@ -47,7 +47,7 @@ def test_markdown_table_formula_footnote_local_and_remote_resource(tmp_path):
     (tmp_path / "picture.png").write_bytes(_png())
     text = "# 数学\n\n| x | y |\n|---|---|\n| 1 | 2 |\n\n$E=mc^2$[^1]\n\n![local](picture.png) ![remote](https://invalid.example/p.png)\n\n[^1]: 公式的注释\n"
     source = tmp_path / "math.md"
-    source.write_text(text, encoding="utf-8")
+    source.write_bytes(text.encode("utf-8"))
     result = extract(source, resource_dir=tmp_path / "resources")
     assert "".join(b["text"] for b in result.blocks) == text
     assert any(b["type"] == "table" for b in result.blocks)

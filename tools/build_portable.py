@@ -142,6 +142,7 @@ def license_inventory(output, site):
     notice = ["YueCang Windows 便携运行候选", "", "CPython 许可证：runtime/LICENSE.txt", "",
               "第三方依赖许可证随各软件包原样保留。完整文件位置见 licenses.json。",
               "OCR 可选组件 Tesseract 未打包；需要时安装并提供 eng/chi_sim 语言包。未安装会显示明确问题。", "",
+              "DOC 转换器 LibreOffice / Word / WPS 未打包；默认仅使用已安装的 LibreOffice。", "",
               *(f"{p['name']}=={p['version']}" for p in packages), ""]
     (output / "THIRD-PARTY-NOTICES.txt").write_text("\n".join(notice), encoding="utf-8")
     (output / "licenses.json").write_text(json.dumps(packages, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")

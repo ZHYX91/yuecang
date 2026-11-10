@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, post } from './api';
-import { Badge, Empty, Issues, Pager, date, shortId, usePagination } from './components';
+import { Badge, Empty, Issues, Pager, Search, date, shortId, usePagination } from './components';
+import { useCollection } from './collections';
 import { useWorkbench } from './store';
 import { characterLength, textOf, type RecordData, type Revision } from './types';
 import RevisionAdvanced from './RevisionAdvanced';
@@ -14,8 +15,9 @@ export default function RevisionEditor({
   selectRevision: (id: string) => void;
   onReviewRequest: (id: string) => void;
 }) {
-  const { state, run, busy, notify, setHasUnsavedEdits } = useWorkbench();
-  const [revision, setRevision] = useState<Revision | null>(null);
+  const { state, run, busy, notify, remember, setHasUnsavedEdits } = useWorkbench();
+  const [loadedRevision, setRevision] = useState<Revision | null>(null);
+  const revision = loadedRevision?.id === revisionId ? loadedRevision : null;
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -25,7 +27,14 @@ export default function RevisionEditor({
   );
   const [showReview, setShowReview] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  const [branchChoice, setBranchChoice] = useState('');
+  const [branchChoice, setBranchChoice] = useState<{ id: string; revisionId: string } | null>(null);
+  const [branchQuery, setBranchQuery] = useState('');
+  const [historyQuery, setHistoryQuery] = useState('');
+  const [branchDetail, setBranchDetail] = useState<{
+    id: string;
+    row?: RecordData;
+    error?: string;
+  } | null>(null);
   const [advancedDirty, setAdvancedDirty] = useState(false);
   useEffect(() => {
     setRevision(null);
@@ -34,8 +43,15 @@ export default function RevisionEditor({
     if (!revisionId) return;
     const controller = new AbortController();
     setLoading(true);
-    void api<Revision>(`/api/revisions/${revisionId}`, { signal: controller.signal })
-      .then((data) => setRevision((data as any).revision || data))
+    void api<Revision>(`/api/revisions/${encodeURIComponent(revisionId)}`, {
+      signal: controller.signal,
+    })
+      .then((data) => {
+        if (controller.signal.aborted) return;
+        const { blocks, changes, ...summary } = data;
+        remember('revisions', [summary]);
+        setRevision(data);
+      })
       .catch((error) => {
         if (error.name !== 'AbortError') setError(error.message);
       })
@@ -43,7 +59,7 @@ export default function RevisionEditor({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [revisionId, reloadKey]);
+  }, [revisionId, reloadKey, remember]);
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
       if (Object.keys(edits).length || advancedDirty) {
@@ -54,17 +70,48 @@ export default function RevisionEditor({
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [edits, advancedDirty]);
-  const bookBranches = state.branches.filter((item) => item.book_id === revision?.book_id);
-  const branch =
-    bookBranches.find((item) => item.id === branchChoice) ||
-    bookBranches.find((item) => item.id === revision?.branch_id) ||
-    bookBranches.find((item) => item.head_revision_id === revisionId) ||
-    (bookBranches.length === 1 ? bookBranches[0] : undefined);
+  const bookId = revision?.book_id;
+  const branches = useCollection(
+    'branches',
+    { book_id: bookId, search: branchQuery.trim() },
+    20,
+    !!bookId,
+  );
+  const history = useCollection(
+    'revisions',
+    { book_id: bookId, search: historyQuery.trim() },
+    20,
+    !!bookId,
+  );
+  const branchId = branchChoice?.revisionId === revisionId ? branchChoice.id : revision?.branch_id;
+  const pageBranch = branchId
+    ? branches.items.find((item) => item.id === branchId)
+    : branches.items.find((item) => item.head_revision_id === revisionId) ||
+      (!branchQuery.trim() && branches.total === 1 ? branches.items[0] : undefined);
+  const missingBranch = branchId && !pageBranch ? branchId : '';
   useEffect(() => {
-    if (revision?.branch_id && !bookBranches.some((item) => item.id === branchChoice))
-      setBranchChoice(revision.branch_id);
-  }, [revision?.branch_id, branchChoice, bookBranches]);
-  const history = state.revisions.filter((item) => item.book_id === revision?.book_id);
+    if (!missingBranch) return;
+    const controller = new AbortController();
+    void api(`/api/branches/${encodeURIComponent(missingBranch)}`, { signal: controller.signal })
+      .then((row) => {
+        if (!controller.signal.aborted) setBranchDetail({ id: missingBranch, row });
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted)
+          setBranchDetail({
+            id: missingBranch,
+            error: error instanceof Error ? error.message : '无法读取整理分支。',
+          });
+      });
+    return () => controller.abort();
+  }, [missingBranch, state.event_id]);
+  const detail = branchDetail?.id === branchId ? branchDetail : null;
+  const branch = pageBranch || (detail?.row?.book_id === bookId ? detail?.row : undefined);
+  const bookBranches = branch && !pageBranch ? [branch, ...branches.items] : branches.items;
+  const selectHistory = (id: string) => {
+    if (branch) setBranchChoice({ id: branch.id, revisionId: id });
+    selectRevision(id);
+  };
   const isHead = !!branch && branch.head_revision_id === revisionId;
   const blocks = revision?.blocks || [];
   const pagination = usePagination(blocks, 12);
@@ -146,6 +193,44 @@ export default function RevisionEditor({
         </div>
         <Badge status={revision.status || 'draft'} />
       </div>
+      <details className="source-tools">
+        <summary>搜索与翻页 · 整理分支和修订</summary>
+        <div className="option-grid">
+          <div>
+            <Search
+              value={branchQuery}
+              onChange={(value) => {
+                setBranchQuery(value);
+                branches.setPage(0);
+              }}
+              placeholder="搜索分支名称"
+            />
+            <Pager
+              page={branches.page}
+              total={branches.total}
+              size={branches.size}
+              onChange={branches.setPage}
+            />
+          </div>
+          <div>
+            <Search
+              value={historyQuery}
+              onChange={(value) => {
+                setHistoryQuery(value);
+                history.setPage(0);
+              }}
+              placeholder="按题名或编号搜索本书修订"
+            />
+            <Pager
+              page={history.page}
+              total={history.total}
+              size={history.size}
+              onChange={history.setPage}
+            />
+          </div>
+        </div>
+      </details>
+      <Issues issues={[branches.error, history.error, detail?.error].filter(Boolean)} />
       <div className="editor-toolbar">
         <label>
           整理分支
@@ -155,8 +240,10 @@ export default function RevisionEditor({
             value={branch?.id || ''}
             onChange={(event) => {
               const next = bookBranches.find((item) => item.id === event.target.value);
-              setBranchChoice(event.target.value);
-              if (next && isHead) selectRevision(next.head_revision_id);
+              if (!next) return;
+              const id = isHead && next.head_revision_id ? next.head_revision_id : revisionId;
+              setBranchChoice({ id: next.id, revisionId: id });
+              if (id !== revisionId) selectRevision(id);
             }}
           >
             <option value="">选择目标分支</option>
@@ -173,16 +260,16 @@ export default function RevisionEditor({
             aria-label="查看修订"
             value={revisionId}
             disabled={dirty > 0 || advancedDirty}
-            onChange={(event) => selectRevision(event.target.value)}
+            onChange={(event) => selectHistory(event.target.value)}
           >
-            {history.map((item) => (
+            {history.items.map((item) => (
               <option key={item.id} value={item.id}>
                 {shortId(item.id)} ·{' '}
                 {['final', 'finalized'].includes(item.status) ? '已定版' : '草稿'}{' '}
                 {branch?.head_revision_id === item.id ? '· 当前' : ''}
               </option>
             ))}
-            {!history.some((item) => item.id === revisionId) && (
+            {!history.items.some((item) => item.id === revisionId) && (
               <option value={revisionId}>{shortId(revisionId)}</option>
             )}
           </select>
@@ -218,11 +305,13 @@ export default function RevisionEditor({
       </div>
       {!isHead && (
         <div className="inline-banner">
-          <span>正在查看历史修订。当前分支已更新，历史内容为只读。</span>
+          <span>
+            {branch ? '正在查看历史修订，内容为只读。' : '请选择整理分支，查看当前稿或恢复此修订。'}
+          </span>
           <button
             className="button small"
             disabled={!branch}
-            onClick={() => branch && selectRevision(branch.head_revision_id)}
+            onClick={() => branch && selectHistory(branch.head_revision_id)}
           >
             查看当前稿
           </button>
@@ -265,7 +354,8 @@ export default function RevisionEditor({
         textDirty={dirty > 0}
         onDirtyChange={setAdvancedDirty}
         onUpdated={(result) => {
-          if (result.branch_id) setBranchChoice(result.branch_id);
+          if (result.branch_id)
+            setBranchChoice({ id: result.branch_id, revisionId: result.revision_id || revisionId });
           if (result.revision_id && result.revision_id !== revisionId)
             selectRevision(result.revision_id);
           else setReloadKey((value) => value + 1);
@@ -301,7 +391,7 @@ export default function RevisionEditor({
           <div className="button-group">
             <button
               className="button primary"
-              disabled={busy > 0}
+              disabled={busy > 0 || !isHead}
               onClick={() => void requestReview()}
             >
               创建审阅请求
@@ -349,7 +439,7 @@ export default function RevisionEditor({
                 });
               }}
             />
-            <Provenance block={block} />
+            <Provenance block={block} editions={revision.metadata?.source_editions} />
           </article>
         ))}
       </div>
@@ -362,7 +452,7 @@ export default function RevisionEditor({
     </div>
   );
 }
-function Provenance({ block }: { block: RecordData }) {
+function Provenance({ block, editions }: { block: RecordData; editions?: RecordData }) {
   const edges =
     block.provenance ||
     block.sources ||
@@ -388,6 +478,20 @@ function Provenance({ block }: { block: RecordData }) {
         ))
       ) : (
         <span>此内容的来源信息请查看修订记录</span>
+      )}
+      {block.source_edition_ranges?.length > 0 && (
+        <details>
+          <summary>选材时的来源版本</summary>
+          {block.source_edition_ranges.map((range: RecordData) => (
+            <p
+              key={`${range.source_id}:${range.block_id}:${range.start}:${range.end}:${range.edition_id}`}
+            >
+              {editions?.[range.edition_id]?.label || shortId(range.edition_id)} · 来源{' '}
+              {shortId(range.source_id)} · 块 {shortId(range.block_id)} · 字符 {range.start}–
+              {range.end}
+            </p>
+          ))}
+        </details>
       )}
     </div>
   );

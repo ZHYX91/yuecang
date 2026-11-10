@@ -20,7 +20,7 @@ TMP_PREFIX = "maintenance_tmp:"
 PENDING_GC = "maintenance_pending_gc"
 TERMINAL = {"succeeded", "failed", "cancelled"}
 TEMP_ROLES = {"temporary", "cache", "scratch"}
-REBUILDABLE_KINDS = {"upload", "extraction", "resource", "ai_request", "ai_response", "cache"}
+REBUILDABLE_KINDS = {"upload", "extraction", "resource", "ai_request", "ai_response", "cache", "assignment_plan", "curation_plan"}
 MAX_TREE_FILES = 100_000
 
 
@@ -134,17 +134,50 @@ def _db_identity(db, marker):
         raise DomainError("unknown_database", "无法验证项目数据库") from exc
 
 
-def _direct_object_shas(db):
-    return {row[0] for row in db.execute("""
+def _direct_object_shas(db, *, require_owner_refs=False):
+    result = {row[0] for row in db.execute("""
         SELECT asset_sha FROM sources UNION SELECT blocks_sha FROM sources WHERE blocks_sha IS NOT NULL
         UNION SELECT document_sha FROM revisions UNION SELECT payload_sha FROM review_requests
         UNION SELECT response_sha FROM review_requests WHERE response_sha IS NOT NULL
     """)}
+    for row in db.execute("SELECT id,evidence,state FROM candidates WHERE kind='source_review'"):
+        try:
+            evidence = json.loads(row["evidence"])
+            roles = ["request", "report"]
+            if row["state"] == "completed" or "response_sha" in evidence:
+                roles.append("response")
+            for role in roles:
+                sha = evidence[f"{role}_sha"]
+                if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+                    raise ValueError("invalid review object hash")
+                if require_owner_refs and not db.execute(
+                    "SELECT 1 FROM object_refs WHERE owner='source_review' AND owner_id=? AND sha=? AND role=?",
+                    (row["id"], sha, role),
+                ).fetchone():
+                    raise ValueError("missing review object reference")
+                result.add(sha)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DomainError("object_reference_missing", "来源核查记录的对象引用无效") from exc
+    for row in db.execute("SELECT id,kind,evidence FROM candidates WHERE kind IN ('assignment_plan','curation_plan')"):
+        try:
+            evidence = json.loads(row["evidence"])
+            sha = evidence["payload_sha"]
+            if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+                raise ValueError("invalid plan payload")
+            if require_owner_refs and not db.execute(
+                "SELECT 1 FROM object_refs WHERE owner=? AND owner_id=? AND sha=? AND role='payload'",
+                (row["kind"], row["id"], sha),
+            ).fetchone():
+                raise ValueError("missing plan reference")
+            result.add(sha)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DomainError("object_reference_missing", "整理计划的冻结对象引用无效") from exc
+    return result
 
 
 def _required_objects(db):
     refs = {row[0] for row in db.execute("SELECT DISTINCT sha FROM object_refs")}
-    if _direct_object_shas(db) - refs:
+    if _direct_object_shas(db, require_owner_refs=True) - refs:
         raise DomainError("object_reference_missing", "原件、修订或审阅对象缺少保留引用")
     objects = {row["sha"]: dict(row) for row in db.execute("SELECT * FROM objects WHERE sha IN (SELECT sha FROM object_refs)")}
     if set(objects) != refs:
@@ -502,6 +535,32 @@ def _cache_candidates(project, db, cutoff):
     return refs, candidates, temporary
 
 
+def _remove_temporary(path):
+    directory = path.is_dir()
+    files = {}
+    for child in _tree_files(path) if directory else [path]:
+        info = os.lstat(_plain(child))
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise DomainError("temporary_identity", "临时对象含共享硬链接或类型已变化")
+        files[child] = _stable(info)
+    if not directory:
+        path.unlink()
+        return
+
+    def retry_read_only(func, name, exc):
+        if os.name != "nt" or func is not os.unlink or not isinstance(exc, PermissionError):
+            raise exc
+        child = _plain(name)
+        info = os.lstat(child)
+        if (files.get(child) != _stable(info) or info.st_nlink != 1
+                or not info.st_file_attributes & stat.FILE_ATTRIBUTE_READONLY):
+            raise exc
+        child.chmod(stat.S_IREAD | stat.S_IWRITE)
+        child.unlink()
+
+    shutil.rmtree(path, onexc=retry_read_only)
+
+
 def cleanup_cache(project: Project, *, apply=False, minimum_age_seconds=86400):
     if (type(minimum_age_seconds) not in (int, float) or not math.isfinite(minimum_age_seconds)
             or minimum_age_seconds < 0):
@@ -554,11 +613,7 @@ def cleanup_cache(project: Project, *, apply=False, minimum_age_seconds=86400):
                 if path.exists():
                     if _identity(path) != item["record"]["identity"]:
                         raise DomainError("temporary_identity", "临时对象在清理前发生变化")
-                    _tree_files(path) if path.is_dir() else _plain(path)
-                    if path.is_dir():
-                        shutil.rmtree(path)
-                    else:
-                        path.unlink()
+                    _remove_temporary(path)
                     result["deleted_bytes"] += item["bytes"]
                 db.execute("DELETE FROM meta WHERE key=?", (item["key"],))
                 result["deleted_temporary"] += 1

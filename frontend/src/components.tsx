@@ -1,6 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import type { RecordData } from './types';
-import { useWorkbench } from './store';
 
 const paths: Record<string, ReactNode> = {
   sources: (
@@ -265,23 +264,4 @@ export function JsonDetails({ title = '查看详情', value }: { title?: string;
       <pre>{JSON.stringify(value, null, 2)}</pre>
     </details>
   );
-}
-export function CollectionCoverage({ collection }: { collection: string }) {
-  const { state, loadMore, busy } = useWorkbench();
-  const loaded = state[collection]?.length || 0;
-  const total = state.totals?.[collection] || loaded;
-  return total > loaded ? (
-    <div className="inline-banner">
-      <span>
-        已载入 {loaded} / 共 {total} 项。当前搜索与分页适用于已载入记录。
-      </span>
-      <button
-        className="button small"
-        disabled={busy > 0}
-        onClick={() => void loadMore(collection)}
-      >
-        载入后续 500 项
-      </button>
-    </div>
-  ) : null;
 }

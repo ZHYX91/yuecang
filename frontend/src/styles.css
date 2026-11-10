@@ -2424,3 +2424,127 @@ pre {
   flex: 0 0 auto;
   align-self: center;
 }
+
+.import-options,
+.source-tools {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 12px 0;
+  background: #fbfcf8;
+}
+.import-options summary,
+.source-tools summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 12px;
+}
+.source-tools > .muted,
+.source-tools > h3,
+.source-tools > .button-group,
+.source-tools > label {
+  margin: 12px 0;
+}
+.option-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+.candidate-preview {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  margin: 10px 0;
+  background: #fff;
+}
+.candidate-preview pre {
+  font: inherit;
+  max-height: 230px;
+  overflow: auto;
+  margin: 10px 0;
+}
+.alignment-ranges {
+  max-height: 260px;
+  overflow: auto;
+  margin: 10px 0;
+}
+.alignment-ranges pre {
+  font: inherit;
+  margin: 8px 0 12px;
+}
+.recovery-preview,
+.boundary-review {
+  border-top: 1px solid var(--line);
+  margin-top: 15px;
+  padding-top: 12px;
+}
+.recovery-preview textarea {
+  width: 100%;
+}
+.recovery-alternatives {
+  margin-top: 15px;
+}
+.source-alignment {
+  padding: 20px;
+  margin: 18px 0;
+}
+@media (max-width: 720px) {
+  .option-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.guided-panel {
+  margin: 1rem 0;
+  padding: 1rem;
+}
+
+.guided-panel > summary,
+.source-panel .detail-section > summary {
+  cursor: pointer;
+}
+
+.guided-source-row,
+.guided-actions,
+.guided-fields {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+}
+
+.guided-source-row > .source-list-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.guided-source-row > input[type='checkbox'] {
+  flex: 0 0 auto;
+  margin-left: .5rem;
+}
+
+.guided-actions {
+  flex-wrap: wrap;
+  margin: .6rem 0;
+}
+
+.guided-fields,
+.guided-options {
+  min-width: 0;
+  margin: .7rem 0;
+  padding: 0;
+  border: 0;
+}
+
+.guided-fields {
+  flex-wrap: wrap;
+  align-items: end;
+}
+
+.guided-fields > label {
+  min-width: min(11rem, 100%);
+}
+
+.guided-options > div + div {
+  margin-top: .75rem;
+}

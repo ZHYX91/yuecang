@@ -34,6 +34,8 @@ export interface WorkbenchState {
   jobs: RecordData[];
   exports: RecordData[];
   review_requests?: RecordData[];
+  assignment_generation: number;
+  disposition_generation: number;
   settings: RecordData;
   storage: RecordData;
   [key: string]: any;
@@ -59,6 +61,8 @@ export const emptyState: WorkbenchState = {
   settings: {},
   storage: {},
   review_requests: [],
+  assignment_generation: 0,
+  disposition_generation: 0,
 };
 export const textOf = (block: Block): string => {
   if (typeof block.text === 'string') return block.text;
@@ -67,8 +71,20 @@ export const textOf = (block: Block): string => {
   if (block.content !== undefined) return JSON.stringify(block.content, null, 2);
   return '';
 };
-export const nameOf = (source: RecordData): string =>
+export const fileNameOf = (source: RecordData): string =>
   source.name || source.filename || source.original_name || source.title || source.id;
+export const derivationOf = (source: RecordData): string => {
+  if (!source.metadata?.derived_from) return '';
+  const options = source.metadata.recovery_options || {};
+  const action = options.repair && options.repair !== 'none' ? '文本修复' : '重新解码';
+  return [action, options.encoding, String(source.id || '').slice(0, 8)]
+    .filter(Boolean)
+    .join(' · ');
+};
+export const nameOf = (source: RecordData): string => {
+  const derivation = derivationOf(source);
+  return fileNameOf(source) + (derivation ? `（${derivation}）` : '');
+};
 export const spanKey = (span: Pick<SelectedSpan, 'source_id' | 'block_id' | 'start' | 'end'>) =>
   `${span.source_id}:${span.block_id}:${span.start ?? ''}:${span.end ?? ''}`;
 export const payloadSpan = ({ source_id, block_id, start, end }: SelectedSpan) => ({
@@ -104,6 +120,58 @@ export const canCancelJob = (status: string) =>
 export const characterLength = (text: string) => Array.from(text).length;
 export const codePointOffset = (text: string, utf16Offset: number) =>
   characterLength(text.slice(0, utf16Offset));
+export const encodingOptions = [
+  ['auto', '自动探测'],
+  ['utf-8', 'UTF-8'],
+  ['utf-8-sig', 'UTF-8（BOM）'],
+  ['gb18030', 'GB18030 / GBK'],
+  ['big5', 'Big5（繁体中文）'],
+  ['utf-16', 'UTF-16（BOM）'],
+  ['utf-16-le', 'UTF-16 LE'],
+  ['utf-16-be', 'UTF-16 BE'],
+  ['utf-32', 'UTF-32（BOM）'],
+  ['utf-32-le', 'UTF-32 LE'],
+  ['utf-32-be', 'UTF-32 BE'],
+  ['cp1252', 'Windows-1252'],
+  ['latin-1', 'Latin-1'],
+].map(([id, label]) => ({ id, label }));
+export const textRecoveryPayload = (preview: RecordData) => ({
+  encoding: preview.encoding,
+  repair: preview.repair,
+  expected_blocks_sha: preview.expected_blocks_sha,
+});
+export const sourceSpansToSelections = (
+  spans: RecordData[],
+  sources: RecordData[],
+): SelectedSpan[] =>
+  spans.map((span) => {
+    const detail = sources.find((item) => (item.source?.id || item.id) === span.source_id);
+    const source = detail?.source || detail;
+    const block = (detail?.blocks || source?.blocks || []).find(
+      (item: Block) => item.id === span.block_id,
+    );
+    if (!source || !block) throw new Error('来源范围已无法读取，请重新分析后再选择。');
+    const characters = Array.from(textOf(block));
+    const start = span.start ?? 0;
+    const end = span.end ?? characters.length;
+    if (
+      !Number.isInteger(start) ||
+      !Number.isInteger(end) ||
+      start < 0 ||
+      end < start ||
+      end > characters.length
+    )
+      throw new Error('来源范围不完整，请重新分析后再选择。');
+    return {
+      source_id: span.source_id,
+      block_id: span.block_id,
+      start,
+      end,
+      text: characters.slice(start, end).join(''),
+      source_name: nameOf(source),
+      type: block.type,
+    };
+  });
 export const normalizeRecord = (item: RecordData): RecordData => ({
   ...item,
   status: item.status ?? item.state,

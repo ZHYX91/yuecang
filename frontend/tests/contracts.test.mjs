@@ -59,6 +59,87 @@ test('composite assembly defaults off and submits only explicit selection with s
   });
 });
 
+test('source repair confirmation carries the exact preview fingerprint and no arbitrary text', async () => {
+  const { textRecoveryPayload, encodingOptions } = await load('types.ts');
+  assert.deepEqual(
+    textRecoveryPayload({
+      encoding: 'gb18030',
+      repair: 'utf8-as-gb18030',
+      expected_blocks_sha: 'preview-fingerprint',
+      preview: '不得作为写入正文发送',
+      original_preview: '原件',
+      source_id: 'source-a',
+    }),
+    { encoding: 'gb18030', repair: 'utf8-as-gb18030', expected_blocks_sha: 'preview-fingerprint' },
+  );
+  assert.equal(
+    encodingOptions.some((item) => item.id === 'auto'),
+    true,
+  );
+  assert.equal(
+    encodingOptions.some((item) => item.id === 'unicode_escape'),
+    false,
+  );
+});
+
+test('derived source display is distinct while the original filename and format stay unchanged', async () => {
+  const { nameOf, fileNameOf, derivationOf } = await load('types.ts');
+  const original = { id: 'source-original', name: '合成资料.txt', metadata: {} };
+  const derived = {
+    id: '12345678-new-source',
+    name: original.name,
+    metadata: {
+      derived_from: original.id,
+      recovery_options: { encoding: 'utf-8', repair: 'none' },
+    },
+  };
+  const saved = structuredClone(derived);
+  assert.equal(nameOf(original), '合成资料.txt');
+  assert.match(nameOf(derived), /重新解码 · utf-8 · 12345678/);
+  assert.equal(fileNameOf(derived), '合成资料.txt');
+  assert.equal(
+    derivationOf({
+      ...derived,
+      metadata: {
+        ...derived.metadata,
+        recovery_options: { encoding: 'utf-8', repair: 'utf8-as-latin1' },
+      },
+    }),
+    '文本修复 · utf-8 · 12345678',
+  );
+  assert.deepEqual(derived, saved);
+});
+
+test('alignment choices preserve source identity and Unicode ranges and reject unknown or invalid spans', async () => {
+  const { sourceSpansToSelections, payloadSpan } = await load('types.ts');
+  const sources = [
+    {
+      source: { id: 's1', name: '合成来源.txt' },
+      blocks: [{ id: 'b1', type: 'paragraph', text: '甲😀乙𝄞丙' }],
+    },
+  ];
+  const selected = sourceSpansToSelections(
+    [{ source_id: 's1', block_id: 'b1', start: 1, end: 4 }],
+    sources,
+  );
+  assert.equal(selected[0].text, '😀乙𝄞');
+  assert.deepEqual(payloadSpan(selected[0]), { source_id: 's1', block_id: 'b1', start: 1, end: 4 });
+  assert.throws(
+    () =>
+      sourceSpansToSelections([{ source_id: 'other', block_id: 'b1', start: 0, end: 1 }], sources),
+    /无法读取/,
+  );
+  assert.throws(
+    () => sourceSpansToSelections([{ source_id: 's1', block_id: 'b1', start: 0, end: 6 }], sources),
+    /不完整/,
+  );
+  assert.throws(
+    () =>
+      sourceSpansToSelections([{ source_id: 's1', block_id: 'b1', start: -1, end: 1 }], sources),
+    /不完整/,
+  );
+});
+
 test('job recovery distinguishes pause, failure and explicitly acknowledged external retry', async () => {
   const { jobRecoveryRequest, canCancelJob } = await load('types.ts');
   const unexpectedConfirmation = () => {
